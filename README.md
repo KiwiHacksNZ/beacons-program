@@ -46,7 +46,7 @@ The public program identifier is a capability-like locator, not an authenticatio
 - The organiser dashboard at `/admin` contains personal data and program-management forms. Protect `/admin*` with Cloudflare Access.
 - The backend does not implement another identity/login system; Cloudflare Access is the admin authentication layer.
 - Prefer a Cloudflare Tunnel or firewall rules so visitors cannot bypass Cloudflare and reach the VPS origin directly.
-- Admin create/rotate forms reject browser POSTs whose `Origin` is not listed in `ADMIN_ORIGINS`.
+- Admin create/rotate forms reject browser POSTs whose `Origin` is not listed in `ADMIN_ORIGINS`; privacy layers that send `Origin: null` are accepted only when the `Referer` is an explicitly allowed admin origin.
 - Logs deliberately omit attendee names, emails, program identifiers, credentials, and database IDs.
 
 ## Organiser workflow

@@ -33,6 +33,22 @@ function debug(event, details = {}) {
   log("info", `debug_${event}`, details);
 }
 
+function isAllowedAdminRequest(request) {
+  const origin = request.headers.origin;
+  if (allowedAdminOrigins.has(origin)) return true;
+  if (origin !== "null") return false;
+
+  // Some privacy layers/proxies turn same-origin form POSTs into Origin: null.
+  // Accept that only when the referrer is an explicitly allowed admin origin.
+  const referer = request.headers.referer;
+  if (!referer) return false;
+  try {
+    return allowedAdminOrigins.has(new URL(referer).origin);
+  } catch {
+    return false;
+  }
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
@@ -103,8 +119,8 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/admin/programs") {
-      debug("admin_create_origin_check", { receivedOrigin: request.headers.origin || null, allowed: allowedAdminOrigins.has(request.headers.origin), allowedAdminOrigins: [...allowedAdminOrigins] });
-      if (!allowedAdminOrigins.has(request.headers.origin)) {
+      debug("admin_create_origin_check", { receivedOrigin: request.headers.origin || null, referer: request.headers.referer || null, fetchSite: request.headers["sec-fetch-site"] || null, allowed: isAllowedAdminRequest(request), allowedAdminOrigins: [...allowedAdminOrigins] });
+      if (!isAllowedAdminRequest(request)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
@@ -119,8 +135,8 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && rotateMatch) {
-      debug("admin_rotate_origin_check", { receivedOrigin: request.headers.origin || null, allowed: allowedAdminOrigins.has(request.headers.origin), allowedAdminOrigins: [...allowedAdminOrigins] });
-      if (!allowedAdminOrigins.has(request.headers.origin)) {
+      debug("admin_rotate_origin_check", { receivedOrigin: request.headers.origin || null, referer: request.headers.referer || null, fetchSite: request.headers["sec-fetch-site"] || null, allowed: isAllowedAdminRequest(request), allowedAdminOrigins: [...allowedAdminOrigins] });
+      if (!isAllowedAdminRequest(request)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
