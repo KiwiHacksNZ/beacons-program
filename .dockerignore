@@ -1,0 +1,8 @@
+.git
+.env
+node_modules
+test
+public-site
+currentdb-DO_NOT-COMMIT.sql
+currentdb-DO_NOT_COMMIT.sql
+npm-debug.log*
