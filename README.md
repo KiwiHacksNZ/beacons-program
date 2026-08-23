@@ -46,7 +46,7 @@ The public program identifier is a capability-like locator, not an authenticatio
 - The organiser dashboard at `/admin` contains personal data and program-management forms. Protect `/admin*` with Cloudflare Access.
 - The backend does not implement another identity/login system; Cloudflare Access is the admin authentication layer.
 - Prefer a Cloudflare Tunnel or firewall rules so visitors cannot bypass Cloudflare and reach the VPS origin directly.
-- Admin create/rotate forms reject browser POSTs whose `Origin` does not match `PUBLIC_BACKEND_URL`.
+- Admin create/rotate forms reject browser POSTs whose `Origin` is not listed in `ADMIN_ORIGINS`.
 - Logs deliberately omit attendee names, emails, program identifiers, credentials, and database IDs.
 
 ## Organiser workflow
@@ -134,7 +134,8 @@ cp .env.example .env
 | `SUPABASE_URL` | Dedicated Beacons Supabase project URL. Server only. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Dedicated project service-role key. Server only. |
 | `HEALTHCHECK_SECRET` | Independent bearer secret used by Docker/daily scheduler. |
-| `PUBLIC_BACKEND_URL` | Canonical HTTPS backend origin; used for admin origin checks and generated URLs. |
+| `PUBLIC_BACKEND_URL` | Canonical HTTPS backend origin used for generated Fillout and leaderboard URLs. |
+| `ADMIN_ORIGINS` | Comma-separated exact browser origins allowed to submit admin forms, such as `http://localhost:6969` for an SSH tunnel. |
 | `PUBLIC_SITE_ORIGINS` | Optional comma-separated browser origins allowed to read public endpoints. |
 | `ADMIN_TITLE` | Optional dashboard heading. |
 

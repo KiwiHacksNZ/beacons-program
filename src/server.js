@@ -2,11 +2,12 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
-import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, isSameOrigin, parseAllowedOrigins, validateProgramName, validateSignup } from "./domain.js";
+import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup } from "./domain.js";
 import { createSupabaseClient } from "./supabase.js";
 
 const config = readConfig();
 const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
+const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
 const supabase = createSupabaseClient({ url: config.supabaseUrl, serviceRoleKey: config.supabaseServiceRoleKey });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
 const leaderboardCache = new Map();
@@ -91,7 +92,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/admin/programs") {
-      if (!isSameOrigin(request.headers.origin, config.publicBackendUrl)) {
+      if (!allowedAdminOrigins.has(request.headers.origin)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
@@ -105,7 +106,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && rotateMatch) {
-      if (!isSameOrigin(request.headers.origin, config.publicBackendUrl)) {
+      if (!allowedAdminOrigins.has(request.headers.origin)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
@@ -140,7 +141,7 @@ function readConfig() {
   const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
   const missing = required.filter((key) => !process.env[key]);
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
-  return { port: Number(process.env.PORT || 3000), supabaseUrl: process.env.SUPABASE_URL, supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons" };
+  return { port: Number(process.env.PORT || 3000), supabaseUrl: process.env.SUPABASE_URL, supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons" };
 }
 
 function programUrls(programSlug) {
