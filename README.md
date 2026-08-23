@@ -138,6 +138,7 @@ cp .env.example .env
 | `ADMIN_ORIGINS` | Comma-separated exact browser origins allowed to submit admin forms, such as `http://localhost:6969` for an SSH tunnel. |
 | `PUBLIC_SITE_ORIGINS` | Optional comma-separated browser origins allowed to read public endpoints. |
 | `ADMIN_TITLE` | Optional dashboard heading. |
+| `DEBUG_LOGS` | Set to `true` temporarily for secret-free request/origin diagnostics; turn it off after debugging. |
 
 Webhook keys are not environment variables. They are generated per program from the protected dashboard and saved only in that program's Fillout setup.
 

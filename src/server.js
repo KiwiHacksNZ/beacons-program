@@ -28,6 +28,11 @@ function log(level, event, details = {}) {
   console[level](JSON.stringify({ time: new Date().toISOString(), event, ...safeDetails }));
 }
 
+function debug(event, details = {}) {
+  if (!config.debugLogs) return;
+  log("info", `debug_${event}`, details);
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
@@ -41,6 +46,8 @@ const server = createServer(async (request, response) => {
         ? "/admin/programs/:program/rotate-key"
         : url.pathname;
 
+  debug("request_start", { method: request.method, path: url.pathname, route: routeName, origin: request.headers.origin || null, host: request.headers.host || null });
+
   try {
     if (request.method === "OPTIONS" && publicMatch) {
       applyCors(request, response);
@@ -49,6 +56,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && publicMatch) {
+      debug("public_leaderboard", { method: request.method });
       applyCors(request, response);
       const programSlug = decodeURIComponent(publicMatch[1]);
       const cached = leaderboardCache.get(programSlug) || (await refreshLeaderboard(programSlug));
@@ -60,12 +68,14 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && webhookMatch) {
       const secret = bearerToken(request.headers.authorization);
+      debug("webhook_received", { method: request.method, hasAuthorization: Boolean(secret), authorizationLength: secret.length });
       if (secret.length < 32) { sendJson(response, 401, { error: "Unauthorized" }); return; }
       const programSlug = decodeURIComponent(webhookMatch[1]);
       const payload = await readJsonBody(request, 128 * 1024);
       const validated = validateSignup(payload);
       if (!validated.ok) { sendJson(response, 400, { error: "Invalid submission", details: validated.errors }); return; }
       const result = await supabase.acceptSignup(programSlug, hashSecret(secret), validated.value);
+      debug("webhook_database_result", { authorized: Boolean(result?.authorized), accepted: Boolean(result?.accepted), referralApplied: Boolean(result?.referral_applied) });
       if (!result?.authorized) { sendJson(response, 401, { error: "Unauthorized" }); return; }
       await refreshLeaderboard(programSlug);
       if (!result.accepted) {
@@ -85,6 +95,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
+      debug("admin_page", { method: request.method });
       const [attendees, programs] = await Promise.all([supabase.getAdminAttendees(), supabase.getAdminPrograms()]);
       const entries = await Promise.all(programs.map(async (program) => [program.public_slug, (await supabase.getLeaderboard(program.public_slug)) || []]));
       sendAdminHtml(response, 200, renderAdmin({ title: config.adminTitle, backendUrl: config.publicBackendUrl, programs, attendees, leaderboardsByProgram: new Map(entries) }));
@@ -92,6 +103,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/admin/programs") {
+      debug("admin_create_origin_check", { receivedOrigin: request.headers.origin || null, allowed: allowedAdminOrigins.has(request.headers.origin), allowedAdminOrigins: [...allowedAdminOrigins] });
       if (!allowedAdminOrigins.has(request.headers.origin)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
@@ -101,11 +113,13 @@ const server = createServer(async (request, response) => {
       if (!validated.ok) { sendAdminHtml(response, 400, renderAdminError({ title: "Program not created", message: validated.error })); return; }
       const credentials = createProgramCredentials();
       const program = await supabase.createProgram({ name: validated.value, publicSlug: credentials.publicSlug, webhookSecretHash: hashSecret(credentials.webhookSecret) });
+      debug("admin_program_created", { databaseAccepted: Boolean(program?.id) });
       sendAdminHtml(response, 201, renderProgramSecret({ mode: "created", programName: program.name, ...programUrls(program.public_slug), secret: credentials.webhookSecret }));
       return;
     }
 
     if (request.method === "POST" && rotateMatch) {
+      debug("admin_rotate_origin_check", { receivedOrigin: request.headers.origin || null, allowed: allowedAdminOrigins.has(request.headers.origin), allowedAdminOrigins: [...allowedAdminOrigins] });
       if (!allowedAdminOrigins.has(request.headers.origin)) {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
@@ -119,6 +133,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/internal/health/db") {
+      debug("health_request", { authorized: isBearerAuthorized(request.headers.authorization, config.healthcheckSecret) });
       if (!isBearerAuthorized(request.headers.authorization, config.healthcheckSecret)) { sendJson(response, 401, { ok: false }); return; }
       const result = await supabase.healthCheck();
       sendJson(response, result?.ok ? 200 : 503, { ok: Boolean(result?.ok) });
@@ -128,20 +143,22 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health/live") { sendJson(response, 200, { ok: true }); return; }
     sendJson(response, 404, { error: "Not found" });
   } catch (error) {
-    log("error", "request_failed", { path: routeName, message: error.message });
+  log("error", "request_failed", { path: routeName, message: error.message, method: request.method, origin: request.headers.origin || null });
     const status = error.statusCode || 503;
     if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: "Service unavailable", message: status === 413 ? error.message : "The database request did not complete. Please try again.", status }));
     else sendJson(response, status, { error: status === 413 || status === 400 ? error.message : "Service temporarily unavailable" });
   }
 });
 
-server.listen(config.port, "0.0.0.0", () => log("info", "server_listening", { port: config.port }));
+server.listen(config.port, "0.0.0.0", () => {
+  log("info", "server_listening", { port: config.port, publicBackendUrl: config.publicBackendUrl, adminOrigins: [...allowedAdminOrigins], publicSiteOrigins: [...allowedOrigins], debugLogs: config.debugLogs });
+});
 
 function readConfig() {
   const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
   const missing = required.filter((key) => !process.env[key]);
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
-  return { port: Number(process.env.PORT || 3000), supabaseUrl: process.env.SUPABASE_URL, supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons" };
+  return { port: Number(process.env.PORT || 3000), supabaseUrl: process.env.SUPABASE_URL, supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true" };
 }
 
 function programUrls(programSlug) {
