@@ -15,14 +15,14 @@ services:
       PUBLIC_SITE_ORIGINS: ${PUBLIC_SITE_ORIGINS}
       ADMIN_TITLE: ${ADMIN_TITLE:-KiwiHacks Beacons}
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
     healthcheck:
       test:
         - CMD
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:3000/internal/health/db',
+          fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/internal/health/db',
           {headers:{authorization:'Bearer '+process.env.HEALTHCHECK_SECRET}})
           .then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
       interval: 30s
