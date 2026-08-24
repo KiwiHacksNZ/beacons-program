@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
-import { renderPublicLeaderboard } from "./public.js";
 import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup, generateRefCode } from "./domain.js";
 import { createNocoDBClient } from "./nocodb.js";
 
@@ -11,7 +10,6 @@ const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
 const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
 const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
-const publicCss = await readFile(fileURLToPath(new URL("./public.css", import.meta.url)), "utf8");
 const leaderboardCache = new Map();
 
 async function refreshLeaderboard(program) {
@@ -61,14 +59,11 @@ function isAllowedAdminRequest(request) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
-  const uiMatch = url.pathname.match(/^\/leaderboard\/([^/]+)$/);
   const webhookMatch = url.pathname.match(/^\/api\/webhooks\/fillout\/([^/]+)$/);
   const rotateMatch = url.pathname.match(/^\/admin\/programs\/([^/]+)\/rotate-key$/i);
   const routeName = publicMatch
     ? "/api/public/programs/:program/leaderboard"
-    : uiMatch
-      ? "/leaderboard/:program"
-      : webhookMatch
+    : webhookMatch
       ? "/api/webhooks/fillout/:program"
       : rotateMatch
         ? "/admin/programs/:program/rotate-key"
@@ -92,20 +87,6 @@ const server = createServer(async (request, response) => {
       if (!cached) { sendJson(response, 404, { error: "Program not found" }); return; }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
       response.end(cached.body);
-      return;
-    }
-
-    if (request.method === "GET" && uiMatch) {
-      debug("public_ui", { method: request.method });
-      const programSlug = decodeURIComponent(uiMatch[1]);
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60", "x-content-type-options": "nosniff" });
-      response.end(renderPublicLeaderboard(programSlug));
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/public/styles.css") {
-      response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      response.end(publicCss);
       return;
     }
 
