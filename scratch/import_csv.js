@@ -117,38 +117,41 @@ async function main() {
   console.log(`Found ${records.length} records to import.`);
   
   let successCount = 0;
+  const BATCH_SIZE = 10;
   
-  for (const record of records) {
-    const signup = {
-      firstName: record["First Name (legal)"],
-      lastName: record["Last Name (legal)"],
-      preferredName: record["Preferred Name"],
-      email: record["Email Address"],
-      referralCodeUsed: record["Referral Code"]
-    };
+  for (let i = 0; i < records.length; i += BATCH_SIZE) {
+    const batch = records.slice(i, i + BATCH_SIZE);
     
-    // We only import if they have an email address
-    if (!signup.email) {
-       console.log(`Skipping record with no email`);
-       continue;
-    }
-    
-    // If the CSV includes their already-made referral code from Supabase, use it!
-    // Otherwise, generate a new one.
-    const existingOwnCode = record["Owned Referral Code"];
-    const generatedRefCode = existingOwnCode ? existingOwnCode : generateRefCode(signup.firstName, signup.lastName, signup.email);
-    
-    try {
-      const result = await db.acceptSignup(program, signup, generatedRefCode);
-      if (result.accepted) {
-        console.log(`Imported ${signup.email} with referral code ${generatedRefCode}`);
-        successCount++;
-      } else {
-        console.log(`Skipped ${signup.email} (already exists)`);
+    await Promise.all(batch.map(async (record) => {
+      const signup = {
+        firstName: record["First Name (legal)"],
+        lastName: record["Last Name (legal)"],
+        preferredName: record["Preferred Name"],
+        email: record["Email Address"],
+        referralCodeUsed: record["Referral Code"]
+      };
+      
+      // We only import if they have an email address
+      if (!signup.email) {
+         console.log(`Skipping record with no email`);
+         return;
       }
-    } catch (err) {
-      console.error(`Failed to import ${signup.email}:`, err.message);
-    }
+      
+      const existingOwnCode = record["Owned Referral Code"];
+      const generatedRefCode = existingOwnCode ? existingOwnCode : generateRefCode(signup.firstName, signup.lastName, signup.email);
+      
+      try {
+        const result = await db.acceptSignup(program, signup, generatedRefCode);
+        if (result.accepted) {
+          console.log(`Imported ${signup.email} with referral code ${generatedRefCode}`);
+          successCount++;
+        } else {
+          console.log(`Skipped ${signup.email} (already exists)`);
+        }
+      } catch (err) {
+        console.error(`Failed to import ${signup.email}:`, err.message);
+      }
+    }));
   }
   
   console.log(`Import complete. Successfully imported ${successCount} records.`);
