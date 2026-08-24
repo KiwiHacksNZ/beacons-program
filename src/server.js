@@ -221,7 +221,7 @@ function readConfig() {
 
 function programUrls(programSlug) {
   const slug = encodeURIComponent(programSlug);
-  return { webhookUrl: `${config.publicBackendUrl}/api/webhooks/fillout/${slug}`, publicLeaderboardUrl: `${config.publicBackendUrl}/api/public/programs/${slug}/leaderboard`, uiUrl: `${config.publicBackendUrl}/leaderboard/${slug}` };
+  return { webhookUrl: `${config.publicBackendUrl}/api/webhooks/fillout/${slug}`, publicLeaderboardUrl: `${config.publicBackendUrl}/api/public/programs/${slug}/leaderboard` };
 }
 
 function applyCors(request, response) {
