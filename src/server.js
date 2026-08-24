@@ -60,7 +60,7 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
   const webhookMatch = url.pathname.match(/^\/api\/webhooks\/fillout\/([^/]+)$/);
-  const rotateMatch = url.pathname.match(/^\/admin\/programs\/([0-9a-f-]{36})\/rotate-key$/i);
+  const rotateMatch = url.pathname.match(/^\/admin\/programs\/([^/]+)\/rotate-key$/i);
   const routeName = publicMatch
     ? "/api/public/programs/:program/leaderboard"
     : webhookMatch

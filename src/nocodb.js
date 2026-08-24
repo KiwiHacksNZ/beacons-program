@@ -164,7 +164,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
         method: "POST",
         body: JSON.stringify(payload)
       });
-      return res;
+      return { ...payload, Id: res.Id || res.id };
     },
 
     async rotateProgramSecret({ programId, webhookSecretHash }) {
@@ -173,11 +173,24 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
         webhook_secret_hash: webhookSecretHash
       };
       const programsTableId = await resolveTableId("programs");
-      const res = await request(`/api/v2/tables/${programsTableId}/records`, {
+      
+      // Update the record
+      await request(`/api/v2/tables/${programsTableId}/records`, {
         method: "PATCH",
         body: JSON.stringify(payload)
       });
-      return res;
+
+      // Fetch and return the updated record so we have its name and slug
+      const idQuery = encodeURIComponent(`(Id,eq,${programId})`);
+      const getRes = await request(`/api/v2/tables/${programsTableId}/records?where=${idQuery}&limit=1`);
+      if (getRes.list && getRes.list.length > 0) {
+        return getRes.list[0];
+      }
+      
+      // Fallback if Id doesn't match, try lowercase id
+      const id2Query = encodeURIComponent(`(id,eq,${programId})`);
+      const getRes2 = await request(`/api/v2/tables/${programsTableId}/records?where=${id2Query}&limit=1`);
+      return getRes2.list && getRes2.list.length > 0 ? getRes2.list[0] : null;
     },
 
     async healthCheck() {
