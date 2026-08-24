@@ -61,7 +61,12 @@ function parseCSV(text) {
   for (let i = 1; i < result.length; i++) {
     const obj = {};
     for (let j = 0; j < headers.length; j++) {
-      obj[headers[j]] = result[i][j] || '';
+      let val = result[i][j] || '';
+      const lower = val.trim().toLowerCase();
+      if (lower === 'null' || lower === 'undefined' || lower === 'none' || lower === 'n/a' || lower === 'na' || lower === '-') {
+        val = '';
+      }
+      obj[headers[j]] = val;
     }
     objects.push(obj);
   }

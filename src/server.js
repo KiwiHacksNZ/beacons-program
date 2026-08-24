@@ -103,7 +103,8 @@ const server = createServer(async (request, response) => {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
       }
-      const generatedRefCode = generateRefCode(validated.value.firstName, validated.value.lastName, validated.value.email);
+      const nameForRefCode = validated.value.preferredName || validated.value.firstName;
+      const generatedRefCode = generateRefCode(nameForRefCode, validated.value.lastName, validated.value.email);
       const result = await db.acceptSignup(program, validated.value, generatedRefCode);
       debug("webhook_database_result", { authorized: Boolean(result?.authorized), accepted: Boolean(result?.accepted), referralApplied: Boolean(result?.referral_applied) });
       if (!result?.authorized) { sendJson(response, 401, { error: "Unauthorized" }); return; }
