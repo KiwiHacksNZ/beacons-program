@@ -36,9 +36,10 @@ function debug(event, details = {}) {
 function isAllowedAdminRequest(request) {
   const origin = request.headers.origin;
   if (allowedAdminOrigins.has(origin)) return true;
-  if (origin !== "null") return false;
+  if (origin !== undefined && origin !== "null") return false;
 
-  // Some privacy layers/proxies turn same-origin form POSTs into Origin: null.
+  // Some privacy layers/proxies turn same-origin form POSTs into Origin: null,
+  // or strip the Origin header entirely (making it undefined).
   // Accept that only when the referrer is an explicitly allowed admin origin.
   const referer = request.headers.referer;
   if (!referer) return false;
