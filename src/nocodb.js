@@ -64,7 +64,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
     async acceptSignup(program, signup, generatedRefCode) {
       const attendeesTableId = await resolveTableId("attendees");
       // 1. Check if email already exists in this program
-      const emailQuery = encodeURIComponent(`(email_normalized,eq,${signup.email.toLowerCase()})~and(program_id,eq,${program.Id || program.id})`);
+      const emailQuery = encodeURIComponent(`(email_normalized,eq,${signup.email.toLowerCase()})~and(program_id,eq,${program.public_slug})`);
       const existing = await request(`/api/v2/tables/${attendeesTableId}/records?where=${emailQuery}&limit=1`);
       
       if (existing.list && existing.list.length > 0) {
@@ -74,7 +74,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       // 2. Check if a valid referral code was used
       let referrerId = null;
       if (signup.referralCodeUsed) {
-        const codeQuery = encodeURIComponent(`(owned_referral_code,eq,${signup.referralCodeUsed.toUpperCase()})~and(program_id,eq,${program.Id || program.id})`);
+        const codeQuery = encodeURIComponent(`(owned_referral_code,eq,${signup.referralCodeUsed.toUpperCase()})~and(program_id,eq,${program.public_slug})`);
         const referrerRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${codeQuery}&limit=1`);
         if (referrerRes.list && referrerRes.list.length > 0) {
           referrerId = referrerRes.list[0].Id || referrerRes.list[0].id;
@@ -83,7 +83,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
 
       // 3. Insert the new attendee
       const payload = {
-        program_id: program.Id || program.id,
+        program_id: program.public_slug,
         first_name: signup.firstName,
         last_name: signup.lastName,
         preferred_name: signup.preferredName || null,
@@ -117,7 +117,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
 
     async getLeaderboard(program) {
       if (!program) return null;
-      const programId = program.Id || program.id;
+      const programId = program.public_slug;
       // Fetch all attendees for this program
       const query = encodeURIComponent(`(program_id,eq,${programId})`);
       const attendees = await fetchAll("attendees", `?where=${query}`);
