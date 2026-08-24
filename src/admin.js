@@ -5,10 +5,15 @@ function text(value) {
 }
 
 export function renderAdmin({ title, backendUrl, programs, attendees, leaderboardsByProgram }) {
-  const programMap = new Map(programs.map((program) => [program.id, program]));
+  const programMap = new Map();
+  for (const p of programs) {
+    programMap.set(p.id, p);
+    programMap.set(String(p.id), p);
+    if (p.public_slug) programMap.set(p.public_slug, p);
+  }
   const attendeeRows = attendees.length
     ? attendees.map((attendee) => {
-      const program = programMap.get(attendee.program_id);
+      const program = programMap.get(attendee.program_slug);
       return `<tr>
         <td>${text(program?.name || "Unknown program")}</td><td>${text(attendee.first_name)}</td><td>${text(attendee.last_name)}</td>
         <td><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a></td><td>${text(attendee.preferred_name)}</td>
