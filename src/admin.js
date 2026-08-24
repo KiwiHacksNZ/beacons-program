@@ -27,11 +27,13 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     ? programs.map((program) => {
       const leaders = leaderboardsByProgram.get(program.public_slug) || [];
       const publicUrl = `${backendUrl}/api/public/programs/${encodeURIComponent(program.public_slug)}/leaderboard`;
+      const uiUrl = `${backendUrl}/leaderboard/${encodeURIComponent(program.public_slug)}`;
       const webhookUrl = `${backendUrl}/api/webhooks/fillout/${encodeURIComponent(program.public_slug)}`;
       return `<article class="program-card">
         <div class="program-topline"><div><p class="kicker">${program.active ? "ACTIVE PROGRAM" : "PAUSED PROGRAM"}</p><h3>${escapeHtml(program.name)}</h3></div><span class="chip">${leaders.length} ranked</span></div>
         <dl>
           <div><dt>Public identifier</dt><dd><code>${escapeHtml(program.public_slug)}</code></dd></div>
+          <div><dt>Public leaderboard UI</dt><dd><a href="${escapeHtml(uiUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(uiUrl)}</a></dd></div>
           <div><dt>Fillout webhook</dt><dd><code>${escapeHtml(webhookUrl)}</code></dd></div>
           <div><dt>Loops ID</dt><dd><code>${escapeHtml(program.loops_transactional_id || "None")}</code></dd></div>
           <div><dt>Public leaderboard API</dt><dd><code>${escapeHtml(publicUrl)}</code></dd></div>
@@ -56,11 +58,11 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
 </main><footer>Personal details and program management stay behind Cloudflare Access.</footer></body></html>`;
 }
 
-export function renderProgramSecret({ mode, programName, webhookUrl, publicLeaderboardUrl, secret }) {
+export function renderProgramSecret({ mode, programName, webhookUrl, publicLeaderboardUrl, uiUrl, secret }) {
   const action = mode === "rotated" ? "Webhook key rotated" : "Program created";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeHtml(action)}</title><link rel="stylesheet" href="/admin/styles.css"></head>
   <body><main class="secret-page" id="main"><section class="secret-card"><p class="kicker">SHOWING ONCE</p><h1>${escapeHtml(action)}</h1><p><strong>${escapeHtml(programName)}</strong> is ready. Save the webhook key now—it is stored only as a hash and cannot be recovered later.</p>
-  <dl class="setup-values"><div><dt>Fillout webhook URL</dt><dd><code>${escapeHtml(webhookUrl)}</code></dd></div><div class="secret-value"><dt>Authorization bearer key</dt><dd><code>${escapeHtml(secret)}</code></dd></div><div><dt>Public leaderboard API</dt><dd><code>${escapeHtml(publicLeaderboardUrl)}</code></dd></div></dl>
+  <dl class="setup-values"><div><dt>Fillout webhook URL</dt><dd><code>${escapeHtml(webhookUrl)}</code></dd></div><div class="secret-value"><dt>Authorization bearer key</dt><dd><code>${escapeHtml(secret)}</code></dd></div><div><dt>Public leaderboard API</dt><dd><code>${escapeHtml(publicLeaderboardUrl)}</code></dd></div><div><dt>Public leaderboard UI</dt><dd><a href="${escapeHtml(uiUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(uiUrl)}</a></dd></div></dl>
   <p class="notice"><strong>Fillout header:</strong> Authorization: Bearer [the key above]</p><a class="button-link" href="/admin">I’ve saved it — return to dashboard</a></section></main></body></html>`;
 }
 
