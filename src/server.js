@@ -42,12 +42,16 @@ function isAllowedAdminRequest(request) {
   // or strip the Origin header entirely (making it undefined).
   // Accept that only when the referrer is an explicitly allowed admin origin.
   const referer = request.headers.referer;
-  if (!referer) return false;
-  try {
-    return allowedAdminOrigins.has(new URL(referer).origin);
-  } catch {
-    return false;
+  if (referer) {
+    try {
+      if (allowedAdminOrigins.has(new URL(referer).origin)) return true;
+    } catch {}
   }
+
+  // Modern browsers send Sec-Fetch-Site: same-origin for same-site requests
+  if (request.headers["sec-fetch-site"] === "same-origin") return true;
+
+  return false;
 }
 
 const server = createServer(async (request, response) => {
@@ -196,7 +200,7 @@ function sendJson(response, status, body) {
 }
 
 function sendAdminHtml(response, status, body) {
-  response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store", "content-security-policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY" });
+  response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store", "content-security-policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'", "referrer-policy": "same-origin", "x-content-type-options": "nosniff", "x-frame-options": "DENY" });
   response.end(body);
 }
 
