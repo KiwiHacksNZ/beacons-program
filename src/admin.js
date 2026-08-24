@@ -28,6 +28,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
         <dl>
           <div><dt>Public identifier</dt><dd><code>${escapeHtml(program.public_slug)}</code></dd></div>
           <div><dt>Fillout webhook</dt><dd><code>${escapeHtml(webhookUrl)}</code></dd></div>
+          <div><dt>Loops ID</dt><dd><code>${escapeHtml(program.loops_transactional_id || "None")}</code></dd></div>
           <div><dt>Public leaderboard API</dt><dd><code>${escapeHtml(publicUrl)}</code></dd></div>
         </dl>
         ${renderLeaders(leaders)}
@@ -41,7 +42,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
 <header><div><p class="kicker">PRIVATE · ORGANISERS ONLY</p><h1>${escapeHtml(title)} dashboard</h1><p>Create programs, connect Fillout, and review referrals.</p></div><div class="stamp" aria-hidden="true">secrets show<br>once only</div></header>
 <main id="main">
   <section class="create-program" aria-labelledby="create-title"><div><p class="kicker">NEW EVENT</p><h2 id="create-title">Create a Beacons program</h2><p>We’ll generate an unguessable public identifier and a separate webhook key.</p></div>
-    <form method="post" action="/admin/programs"><label for="program-name">Program or event name</label><div class="form-row"><input id="program-name" name="name" maxlength="120" required placeholder="e.g. KiwiHacks Nova 2027"><button type="submit">Create program</button></div></form>
+    <form method="post" action="/admin/programs"><label for="program-name">Program or event name</label><div class="form-row"><input id="program-name" name="name" maxlength="120" required placeholder="e.g. KiwiHacks Nova 2027"></div><label for="loops-id">Loops Transactional ID (Optional)</label><div class="form-row"><input id="loops-id" name="loopsTransactionalId" placeholder="e.g. cm1152..."></div><div class="form-row"><button type="submit">Create program</button></div></form>
   </section>
   <section aria-labelledby="programs-title"><div class="section-heading"><div><p class="kicker">PROGRAM-SCOPED</p><h2 id="programs-title">Programs & leaderboards</h2></div><span class="chip">${programs.length} total</span></div><div class="program-grid">${programCards}</div></section>
   <section class="attendees" aria-labelledby="attendees-title"><div class="section-heading"><div><p class="kicker">PRIVATE DETAILS</p><h2 id="attendees-title">Accepted signups</h2></div><span class="chip">${attendees.length} total</span></div>

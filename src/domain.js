@@ -68,6 +68,19 @@ export function hashSecret(secret) {
   return createHash("sha256").update(String(secret)).digest("hex");
 }
 
+export function generateRefCode(firstName, lastName, email) {
+  const fName = String(firstName || "").trim();
+  const lName = String(lastName || "").trim();
+  const em = String(email || "").trim();
+  const currentTimeSec = Math.floor(Date.now() / 1000);
+  
+  const rawData = `${fName}${lName}${em}${currentTimeSec}`.toLowerCase();
+  const hashStr = createHash("sha256").update(rawData).digest("hex").slice(0, 5);
+  
+  const prefix = fName.length >= 3 ? fName.slice(0, 3) : fName.padEnd(3, "x");
+  return `${prefix}-${hashStr}`.toUpperCase();
+}
+
 export function bearerToken(headerValue) {
   if (typeof headerValue !== "string") return "";
   const match = headerValue.match(/^Bearer\s+(.+)$/i);

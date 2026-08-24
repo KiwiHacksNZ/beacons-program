@@ -2,18 +2,20 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
-import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup } from "./domain.js";
-import { createSupabaseClient } from "./supabase.js";
+import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup, generateRefCode } from "./domain.js";
+import { createNocoDBClient } from "./nocodb.js";
 
 const config = readConfig();
 const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
 const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
-const supabase = createSupabaseClient({ url: config.supabaseUrl, serviceRoleKey: config.supabaseServiceRoleKey });
+const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
 const leaderboardCache = new Map();
 
-async function refreshLeaderboard(programSlug) {
-  const leaderboard = await supabase.getLeaderboard(programSlug);
+async function refreshLeaderboard(program) {
+  if (!program) return null;
+  const programSlug = program.public_slug;
+  const leaderboard = await db.getLeaderboard(program);
   if (leaderboard === null) return null;
   const cached = { body: JSON.stringify(leaderboard), refreshedAt: Date.now() };
   leaderboardCache.set(programSlug, cached);
@@ -80,7 +82,8 @@ const server = createServer(async (request, response) => {
       debug("public_leaderboard", { method: request.method });
       applyCors(request, response);
       const programSlug = decodeURIComponent(publicMatch[1]);
-      const cached = leaderboardCache.get(programSlug) || (await refreshLeaderboard(programSlug));
+      const program = await db.getProgramBySlug(programSlug);
+      const cached = leaderboardCache.get(programSlug) || (await refreshLeaderboard(program));
       if (!cached) { sendJson(response, 404, { error: "Program not found" }); return; }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
       response.end(cached.body);
@@ -95,16 +98,30 @@ const server = createServer(async (request, response) => {
       const payload = await readJsonBody(request, 128 * 1024);
       const validated = validateSignup(payload);
       if (!validated.ok) { sendJson(response, 400, { error: "Invalid submission", details: validated.errors }); return; }
-      const result = await supabase.acceptSignup(programSlug, hashSecret(secret), validated.value);
+      const program = await db.getProgramBySlug(programSlug);
+      if (!program || program.webhook_secret_hash !== hashSecret(secret)) {
+        sendJson(response, 401, { error: "Unauthorized" });
+        return;
+      }
+      const generatedRefCode = generateRefCode(validated.value.firstName, validated.value.lastName, validated.value.email);
+      const result = await db.acceptSignup(program, validated.value, generatedRefCode);
       debug("webhook_database_result", { authorized: Boolean(result?.authorized), accepted: Boolean(result?.accepted), referralApplied: Boolean(result?.referral_applied) });
       if (!result?.authorized) { sendJson(response, 401, { error: "Unauthorized" }); return; }
-      await refreshLeaderboard(programSlug);
+      await refreshLeaderboard(program);
       if (!result.accepted) {
         log("info", "signup_duplicate_ignored");
         sendJson(response, 200, { accepted: false, status: "duplicate_ignored" });
         return;
       }
       log("info", "signup_accepted", { referralApplied: Boolean(result.referral_applied) });
+      
+      if (result.loops_transactional_id && config.loopsApiKey) {
+        const firstName = validated.value.preferredName || validated.value.firstName;
+        sendLoopsEmail(validated.value.email, firstName, result.owned_referral_code, result.loops_transactional_id)
+          .then(() => log("info", "loops_email_sent", { email: validated.value.email }))
+          .catch(err => log("error", "loops_email_failed", { email: validated.value.email, error: err.message }));
+      }
+
       sendJson(response, 201, { accepted: true, status: "created", referralApplied: Boolean(result.referral_applied) });
       return;
     }
@@ -117,8 +134,8 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
       debug("admin_page", { method: request.method });
-      const [attendees, programs] = await Promise.all([supabase.getAdminAttendees(), supabase.getAdminPrograms()]);
-      const entries = await Promise.all(programs.map(async (program) => [program.public_slug, (await supabase.getLeaderboard(program.public_slug)) || []]));
+      const [attendees, programs] = await Promise.all([db.getAdminAttendees(), db.getAdminPrograms()]);
+      const entries = await Promise.all(programs.map(async (program) => [program.public_slug, (await db.getLeaderboard(program)) || []]));
       sendAdminHtml(response, 200, renderAdmin({ title: config.adminTitle, backendUrl: config.publicBackendUrl, programs, attendees, leaderboardsByProgram: new Map(entries) }));
       return;
     }
@@ -131,10 +148,11 @@ const server = createServer(async (request, response) => {
       }
       const form = await readFormBody(request, 16 * 1024);
       const validated = validateProgramName(form.get("name"));
+      const loopsTransactionalId = form.get("loopsTransactionalId") || null;
       if (!validated.ok) { sendAdminHtml(response, 400, renderAdminError({ title: "Program not created", message: validated.error })); return; }
       const credentials = createProgramCredentials();
-      const program = await supabase.createProgram({ name: validated.value, publicSlug: credentials.publicSlug, webhookSecretHash: hashSecret(credentials.webhookSecret) });
-      debug("admin_program_created", { databaseAccepted: Boolean(program?.id) });
+      const program = await db.createProgram({ name: validated.value, publicSlug: credentials.publicSlug, webhookSecretHash: hashSecret(credentials.webhookSecret), loopsTransactionalId });
+      debug("admin_program_created", { databaseAccepted: Boolean(program?.Id || program?.id) });
       sendAdminHtml(response, 201, renderProgramSecret({ mode: "created", programName: program.name, ...programUrls(program.public_slug), secret: credentials.webhookSecret }));
       return;
     }
@@ -147,7 +165,7 @@ const server = createServer(async (request, response) => {
       }
       await readFormBody(request, 1024);
       const credentials = createProgramCredentials();
-      const program = await supabase.rotateProgramSecret({ programId: rotateMatch[1], webhookSecretHash: hashSecret(credentials.webhookSecret) });
+      const program = await db.rotateProgramSecret({ programId: rotateMatch[1], webhookSecretHash: hashSecret(credentials.webhookSecret) });
       if (!program) { sendAdminHtml(response, 404, renderAdminError({ title: "Program not found", message: "The webhook key was not changed.", status: 404 })); return; }
       sendAdminHtml(response, 200, renderProgramSecret({ mode: "rotated", programName: program.name, ...programUrls(program.public_slug), secret: credentials.webhookSecret }));
       return;
@@ -156,7 +174,7 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/internal/health/db") {
       debug("health_request", { authorized: isBearerAuthorized(request.headers.authorization, config.healthcheckSecret) });
       if (!isBearerAuthorized(request.headers.authorization, config.healthcheckSecret)) { sendJson(response, 401, { ok: false }); return; }
-      const result = await supabase.healthCheck();
+      const result = await db.healthCheck();
       sendJson(response, result?.ok ? 200 : 503, { ok: Boolean(result?.ok) });
       return;
     }
@@ -176,10 +194,10 @@ server.listen(config.port, "0.0.0.0", () => {
 });
 
 function readConfig() {
-  const required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
+  const required = ["NOCODB_URL", "NOCODB_API_TOKEN", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
   const missing = required.filter((key) => !process.env[key]);
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
-  return { port: Number(process.env.PORT || 3000), supabaseUrl: process.env.SUPABASE_URL, supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true" };
+  return { port: Number(process.env.PORT || 3000), nocodbUrl: process.env.NOCODB_URL, nocodbApiToken: process.env.NOCODB_API_TOKEN, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true", loopsApiKey: process.env.LOOPS_API_KEY || "" };
 }
 
 function programUrls(programSlug) {
@@ -220,4 +238,28 @@ async function readBody(request, maxBytes) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function sendLoopsEmail(email, firstName, refCode, transactionalId) {
+  const response = await fetch("https://app.loops.so/api/v1/transactional", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${config.loopsApiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      transactionalId: transactionalId,
+      email: email,
+      dataVariables: {
+        refCode: refCode,
+        ref: refCode,
+        name: firstName,
+        firstName: firstName
+      }
+    }),
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!response.ok) {
+    throw new Error(`Loops returned ${response.status}: ${await response.text()}`);
+  }
 }
