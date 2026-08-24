@@ -1,6 +1,6 @@
 import { toPublicLeaderboard } from "./domain.js";
 
-export function createNocoDBClient({ url, apiToken }) {
+export function createNocoDBClient({ url, apiToken, projectId }) {
   const baseUrl = String(url || "").replace(/\/$/, "");
 
   async function request(path, options = {}) {
@@ -17,10 +17,30 @@ export function createNocoDBClient({ url, apiToken }) {
     const text = await response.text();
     const body = text ? safeJson(text) : null;
     if (!response.ok) {
+      if (!body || body.message === "NocoDB returned an unreadable response.") {
+        console.error(`NocoDB Error Text for ${path}:`, text);
+      }
       const detail = body?.message || body?.msg || body?.error || `NocoDB returned ${response.status}`;
       throw new Error(detail);
     }
     return body;
+  }
+
+  let tableIdMap = null;
+
+  async function resolveTableId(tableName) {
+    if (!projectId) throw new Error("NOCODB_PROJECT_ID is required to resolve tables");
+    if (!tableIdMap) {
+      const res = await request(`/api/v2/meta/bases/${projectId}/tables`);
+      tableIdMap = {};
+      for (const table of (res.list || [])) {
+        tableIdMap[table.title] = table.id;
+        tableIdMap[table.table_name] = table.id;
+      }
+    }
+    const id = tableIdMap[tableName];
+    if (!id) throw new Error(`Table ${tableName} not found in NocoDB project ${projectId}`);
+    return id;
   }
 
   // Helper to fetch all records handling pagination
@@ -28,9 +48,10 @@ export function createNocoDBClient({ url, apiToken }) {
     let offset = 0;
     const limit = 1000;
     const records = [];
+    const tableId = await resolveTableId(table);
     while (true) {
       const qs = queryParams ? `${queryParams}&limit=${limit}&offset=${offset}` : `?limit=${limit}&offset=${offset}`;
-      const res = await request(`/api/v2/tables/${table}/records${qs}`);
+      const res = await request(`/api/v2/tables/${tableId}/records${qs}`);
       const list = res.list || [];
       records.push(...list);
       if (res.pageInfo.isLastPage || list.length < limit) break;
@@ -41,9 +62,10 @@ export function createNocoDBClient({ url, apiToken }) {
 
   return {
     async acceptSignup(program, signup, generatedRefCode) {
+      const attendeesTableId = await resolveTableId("attendees");
       // 1. Check if email already exists in this program
       const emailQuery = encodeURIComponent(`(email_normalized,eq,${signup.email.toLowerCase()})~and(program_id,eq,${program.Id || program.id})`);
-      const existing = await request(`/api/v2/tables/attendees/records?where=${emailQuery}&limit=1`);
+      const existing = await request(`/api/v2/tables/${attendeesTableId}/records?where=${emailQuery}&limit=1`);
       
       if (existing.list && existing.list.length > 0) {
         return { authorized: true, accepted: false, referral_applied: false };
@@ -53,7 +75,7 @@ export function createNocoDBClient({ url, apiToken }) {
       let referrerId = null;
       if (signup.referralCodeUsed) {
         const codeQuery = encodeURIComponent(`(owned_referral_code,eq,${signup.referralCodeUsed.toUpperCase()})~and(program_id,eq,${program.Id || program.id})`);
-        const referrerRes = await request(`/api/v2/tables/attendees/records?where=${codeQuery}&limit=1`);
+        const referrerRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${codeQuery}&limit=1`);
         if (referrerRes.list && referrerRes.list.length > 0) {
           referrerId = referrerRes.list[0].Id || referrerRes.list[0].id;
         }
@@ -71,7 +93,7 @@ export function createNocoDBClient({ url, apiToken }) {
         referral_code_used: signup.referralCodeUsed || null
       };
 
-      const res = await request(`/api/v2/tables/attendees/records`, {
+      const res = await request(`/api/v2/tables/${attendeesTableId}/records`, {
         method: "POST",
         body: JSON.stringify(payload)
       });
@@ -87,8 +109,9 @@ export function createNocoDBClient({ url, apiToken }) {
     },
 
     async getProgramBySlug(programSlug) {
+      const programsTableId = await resolveTableId("programs");
       const slugQuery = encodeURIComponent(`(public_slug,eq,${programSlug})~and(active,eq,true)`);
-      const res = await request(`/api/v2/tables/programs/records?where=${slugQuery}&limit=1`);
+      const res = await request(`/api/v2/tables/${programsTableId}/records?where=${slugQuery}&limit=1`);
       return res.list && res.list.length > 0 ? res.list[0] : null;
     },
 
@@ -136,7 +159,8 @@ export function createNocoDBClient({ url, apiToken }) {
         active: true
       };
       
-      const res = await request(`/api/v2/tables/programs/records`, {
+      const programsTableId = await resolveTableId("programs");
+      const res = await request(`/api/v2/tables/${programsTableId}/records`, {
         method: "POST",
         body: JSON.stringify(payload)
       });
@@ -148,7 +172,8 @@ export function createNocoDBClient({ url, apiToken }) {
         Id: programId,
         webhook_secret_hash: webhookSecretHash
       };
-      const res = await request(`/api/v2/tables/programs/records`, {
+      const programsTableId = await resolveTableId("programs");
+      const res = await request(`/api/v2/tables/${programsTableId}/records`, {
         method: "PATCH",
         body: JSON.stringify(payload)
       });

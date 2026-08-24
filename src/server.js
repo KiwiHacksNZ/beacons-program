@@ -8,7 +8,7 @@ import { createNocoDBClient } from "./nocodb.js";
 const config = readConfig();
 const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
 const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
-const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken });
+const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
 const leaderboardCache = new Map();
 
@@ -194,10 +194,10 @@ server.listen(config.port, "0.0.0.0", () => {
 });
 
 function readConfig() {
-  const required = ["NOCODB_URL", "NOCODB_API_TOKEN", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
+  const required = ["NOCODB_URL", "NOCODB_API_TOKEN", "NOCODB_PROJECT_ID", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
   const missing = required.filter((key) => !process.env[key]);
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
-  return { port: Number(process.env.PORT || 3000), nocodbUrl: process.env.NOCODB_URL, nocodbApiToken: process.env.NOCODB_API_TOKEN, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true", loopsApiKey: process.env.LOOPS_API_KEY || "" };
+  return { port: Number(process.env.PORT || 3000), nocodbUrl: process.env.NOCODB_URL, nocodbApiToken: process.env.NOCODB_API_TOKEN, nocodbProjectId: process.env.NOCODB_PROJECT_ID, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true", loopsApiKey: process.env.LOOPS_API_KEY || "" };
 }
 
 function programUrls(programSlug) {
