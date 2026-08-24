@@ -73,11 +73,13 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
 
       // 2. Check if a valid referral code was used
       let referrerId = null;
+      let validReferralCode = null;
       if (signup.referralCodeUsed) {
         const codeQuery = encodeURIComponent(`(owned_referral_code,eq,${signup.referralCodeUsed.toUpperCase()})~and(program_slug,eq,${program.public_slug})`);
         const referrerRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${codeQuery}&limit=1`);
         if (referrerRes.list && referrerRes.list.length > 0) {
           referrerId = referrerRes.list[0].Id || referrerRes.list[0].id;
+          validReferralCode = signup.referralCodeUsed.toUpperCase();
         }
       }
 
@@ -90,7 +92,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
         email: signup.email,
         email_normalized: signup.email.toLowerCase(),
         owned_referral_code: generatedRefCode,
-        referral_code_used: signup.referralCodeUsed || null
+        referral_code_used: validReferralCode
       };
 
       const res = await request(`/api/v2/tables/${attendeesTableId}/records`, {

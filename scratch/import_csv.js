@@ -128,7 +128,10 @@ async function main() {
        continue;
     }
     
-    const generatedRefCode = generateRefCode(signup.firstName, signup.lastName, signup.email);
+    // If the CSV includes their already-made referral code from Supabase, use it!
+    // Otherwise, generate a new one.
+    const existingOwnCode = record["Owned Referral Code"];
+    const generatedRefCode = existingOwnCode ? existingOwnCode : generateRefCode(signup.firstName, signup.lastName, signup.email);
     
     try {
       const result = await db.acceptSignup(program, signup, generatedRefCode);
