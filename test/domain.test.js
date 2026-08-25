@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import {
   createProgramCredentials,
   escapeHtml,
+  generateRefCode,
   hashSecret,
   isBearerAuthorized,
   isSameOrigin,
+  isValidReferralCode,
+  isValidPublicSlug,
+  parseAllowedOrigins,
   toPublicLeaderboard,
   validateProgramName,
   validateSignup,
@@ -35,6 +39,20 @@ test("rejects missing and invalid fields", () => {
   assert.deepEqual(result.errors, ["firstName is required.", "email must be valid."]);
 });
 
+test("rejects values that could alter a NocoDB filter", () => {
+  const email = validateSignup({ firstName: "A", lastName: "B", email: "a)~or(active,eq,true)@example.com" });
+  const code = validateSignup({ firstName: "A", lastName: "B", email: "a@example.com", referralCodeUsed: "OK)~OR(X" });
+  assert.equal(email.ok, false);
+  assert.equal(code.ok, false);
+});
+
+test("rejects control characters in human-readable fields", () => {
+  const signup = validateSignup({ firstName: "Ali\nInjected", lastName: "Example", email: "a@example.com" });
+  assert.equal(signup.ok, false);
+  assert.match(signup.errors.join(" "), /control characters/);
+  assert.match(validateProgramName("Nova\u0000Hidden").error, /control characters/);
+});
+
 test("bearer authorization requires an exact secret", () => {
   assert.equal(isBearerAuthorized("Bearer correct-horse", "correct-horse"), true);
   assert.equal(isBearerAuthorized("Bearer incorrect", "correct-horse"), false);
@@ -50,6 +68,18 @@ test("creates separate unguessable program and webhook credentials", () => {
   assert.notEqual(first.webhookSecret, second.webhookSecret);
   assert.match(hashSecret(first.webhookSecret), /^[a-f0-9]{64}$/);
   assert.equal(hashSecret(first.webhookSecret), hashSecret(first.webhookSecret));
+  assert.equal(isValidPublicSlug(first.publicSlug), true);
+  assert.equal(isValidPublicSlug("bp_invalid)~or(active,eq,true)"), false);
+});
+
+test("creates sanitized referral codes with independent random suffixes", () => {
+  const first = generateRefCode("Émi<script>");
+  const second = generateRefCode("Émi<script>");
+  assert.match(first, /^EMIS-[A-F0-9]{12}$/);
+  assert.match(second, /^EMIS-[A-F0-9]{12}$/);
+  assert.notEqual(first, second);
+  assert.equal(isValidReferralCode(first), true);
+  assert.equal(isValidReferralCode("BAD)~OR(X"), false);
 });
 
 test("validates program names and admin request origins", () => {
@@ -73,4 +103,11 @@ test("public leaderboard strips private fields and excludes zero counts", () => 
 
 test("escapes admin values", () => {
   assert.equal(escapeHtml('<script>alert("x")</script>'), "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
+});
+
+test("normalizes configured browser origins and ignores invalid values", () => {
+  assert.deepEqual([...parseAllowedOrigins("https://example.com/, http://localhost:8080/path, nope")], [
+    "https://example.com",
+    "http://localhost:8080",
+  ]);
 });

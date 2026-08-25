@@ -79,6 +79,61 @@ test("skips simultaneous case-variant emails within the same program", async () 
   }
 });
 
+test("database failures do not expose filter values or upstream response bodies", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [{ title: "programs", table_name: "programs", id: "programs-id" }] });
+    }
+    return new Response(JSON.stringify({ message: "private@example.com secret upstream detail" }), { status: 500 });
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    await assert.rejects(client.getProgramBySlug("bp_safe"), (error) => {
+      assert.equal(error.message, "NocoDB request failed with status 500.");
+      assert.doesNotMatch(error.message, /private@example|bp_safe|upstream detail/);
+      return true;
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("database health verifies both required tables are readable", async () => {
+  const originalFetch = globalThis.fetch;
+  const reads = [];
+  globalThis.fetch = async (url) => {
+    const path = `${new URL(url).pathname}${new URL(url).search}`;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [
+        { title: "programs", table_name: "programs", id: "programs-id" },
+        { title: "attendees", table_name: "attendees", id: "attendees-id" },
+      ] });
+    }
+    if (path === "/api/v2/meta/tables/programs-id") {
+      return jsonResponse({ columns: ["Id", "name", "public_slug", "webhook_secret_hash", "loops_transactional_id", "active"].map((title) => ({ title })) });
+    }
+    if (path === "/api/v2/meta/tables/attendees-id") {
+      return jsonResponse({ columns: ["Id", "program_slug", "first_name", "last_name", "preferred_name", "email", "email_normalized", "owned_referral_code", "referral_code_used"].map((title) => ({ title })) });
+    }
+    reads.push(path);
+    return jsonResponse({ list: [], pageInfo: { isLastPage: true } });
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    assert.deepEqual(await client.healthCheck(), { ok: true });
+    assert.deepEqual(reads.sort(), [
+      "/api/v2/tables/attendees-id/records?limit=1",
+      "/api/v2/tables/programs-id/records?limit=1",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function jsonResponse(body) {
   return new Response(JSON.stringify(body), {
     status: 200,

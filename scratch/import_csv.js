@@ -3,7 +3,7 @@ import { env } from "node:process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { createNocoDBClient } from "../src/nocodb.js";
-import { generateRefCode } from "../src/domain.js";
+import { generateRefCode, isValidReferralCode, validateSignup } from "../src/domain.js";
 
 function parseCSV(text) {
   const result = [];
@@ -123,7 +123,7 @@ async function main() {
     const batch = records.slice(i, i + BATCH_SIZE);
     
     await Promise.all(batch.map(async (record) => {
-      const signup = {
+      const rawSignup = {
         firstName: record["First Name (legal)"],
         lastName: record["Last Name (legal)"],
         preferredName: record["Preferred Name"],
@@ -132,12 +132,23 @@ async function main() {
       };
       
       // We only import if they have an email address
-      if (!signup.email) {
+      if (!rawSignup.email) {
          console.log(`Skipping record with no email`);
          return;
       }
+
+      const validated = validateSignup(rawSignup);
+      if (!validated.ok) {
+        console.log(`Skipping invalid record: ${validated.errors.join(" ")}`);
+        return;
+      }
+      const signup = validated.value;
       
-      const existingOwnCode = record["Owned Referral Code"];
+      const existingOwnCode = String(record["Owned Referral Code"] || "").trim().toUpperCase();
+      if (existingOwnCode && !isValidReferralCode(existingOwnCode)) {
+        console.log("Skipping record with an invalid owned referral code");
+        return;
+      }
       const generatedRefCode = existingOwnCode ? existingOwnCode : generateRefCode(signup.firstName, signup.lastName, signup.email);
       
       try {

@@ -38,3 +38,29 @@ test("an older slow read cannot overwrite a newer refresh", async () => {
 
   assert.deepEqual(JSON.parse(cache.get("bp_program").body), newest);
 });
+
+test("getOrRefresh serves fresh data and coalesces expired concurrent reads", async () => {
+  let currentTime = 100;
+  let reads = 0;
+  let finishRead;
+  const delayedRead = new Promise((resolve) => { finishRead = resolve; });
+  const cache = createLeaderboardCache({
+    loadLeaderboard: async () => {
+      reads += 1;
+      return reads === 1 ? [{ displayName: "Ali", referralCount: 1 }] : delayedRead;
+    },
+    now: () => currentTime,
+  });
+  const program = { public_slug: "bp_program" };
+
+  await cache.getOrRefresh(program, 1_000);
+  await cache.getOrRefresh(program, 1_000);
+  assert.equal(reads, 1);
+
+  currentTime = 1_101;
+  const first = cache.getOrRefresh(program, 1_000);
+  const second = cache.getOrRefresh(program, 1_000);
+  assert.equal(reads, 2);
+  finishRead([{ displayName: "Ali", referralCount: 2 }]);
+  assert.equal(await first, await second);
+});

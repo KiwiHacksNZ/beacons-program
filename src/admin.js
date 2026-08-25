@@ -7,8 +7,9 @@ function text(value) {
 export function renderAdmin({ title, backendUrl, programs, attendees, leaderboardsByProgram }) {
   const programMap = new Map();
   for (const p of programs) {
-    programMap.set(p.id, p);
-    programMap.set(String(p.id), p);
+    const programId = p.Id ?? p.id;
+    programMap.set(programId, p);
+    programMap.set(String(programId), p);
     if (p.public_slug) programMap.set(p.public_slug, p);
   }
   const attendeeRows = attendees.length
@@ -26,6 +27,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
 
   const programCards = programs.length
     ? programs.map((program) => {
+      const programId = program.Id ?? program.id;
       const leaders = leaderboardsByProgram.get(program.public_slug) || [];
       const publicUrl = `${backendUrl}/api/public/programs/${encodeURIComponent(program.public_slug)}/leaderboard`;
       const webhookUrl = `${backendUrl}/api/webhooks/fillout/${encodeURIComponent(program.public_slug)}`;
@@ -38,7 +40,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
           <div><dt>Public leaderboard API</dt><dd><code>${escapeHtml(publicUrl)}</code></dd></div>
         </dl>
         ${renderLeaders(leaders)}
-        <form method="post" action="/admin/programs/${encodeURIComponent(program.id)}/rotate-key"><button class="quiet-button" type="submit">Rotate webhook key</button></form>
+        <form method="post" action="/admin/programs/${encodeURIComponent(programId)}/rotate-key"><button class="quiet-button" type="submit">Rotate webhook key</button></form>
       </article>`;
     }).join("")
     : '<div class="empty-card"><strong>No programs yet.</strong><p>Create the first event to get its Fillout webhook and one-time API key.</p></div>';

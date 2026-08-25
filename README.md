@@ -1,76 +1,142 @@
-# KiwiHacks Beacons MVP
+# KiwiHacks Beacons
 
-A multi-program referral service with one clear security boundary: only the VPS backend can reach the dedicated Supabase database.
+A small, dependency-free Node.js service for program-scoped referral signups and leaderboards. The backend is the only component that talks to NocoDB. Fillout submits authenticated webhooks, Loops can deliver each attendee's referral code, and organisers manage programs through a Cloudflare Access-protected dashboard.
 
-This MVP intentionally does **not** read, import, or migrate `currentdb-DO_NOT_COMMIT.sql`. That file is a retired legacy dump and may contain personal data.
-
-## Architecture
+## Architecture and trust boundaries
 
 ```text
-Fillout program A ──program URL + key──┐
-Fillout program B ──program URL + key──┼──▶ VPS Node backend ──service role──▶ dedicated Supabase
-                                      │         │
-                                      │         ├── program-scoped public leaderboard API
-                                      │         ├── /admin ◀── Cloudflare Access
-                                      │         └── daily database health hook
-                                      │
-                                      └── each webhook key is stored only as a SHA-256 hash
+Fillout ── program URL + bearer key ──▶ Node backend ── server token ──▶ NocoDB
+                                             │
+Public site ◀── safe leaderboard JSON ────────┤
+                                             ├──▶ Loops transactional email
+Organisers ── Cloudflare Access ───────────▶ /admin
+Monitor ── independent bearer secret ─────▶ /internal/health/db
 ```
 
-- `src/`: dependency-free Node 22 backend and server-rendered organiser dashboard.
-- `supabase/migrations/`: fresh multi-program Beacons schema and atomic database functions.
-- `Dockerfile` and `docker-compose.yml`: VPS/Portainer deployment.
-- `test/`: validation, credential generation, origin checks, output filtering, and escaping tests.
+- NocoDB and Loops credentials exist only in the backend environment.
+- Each program has a 144-bit random public identifier and a separate 256-bit webhook key.
+- Only the SHA-256 hash of a webhook key is stored. The original is shown once.
+- Public leaderboard rows contain exactly `displayName` and `referralCount`.
+- `/admin*` exposes personal data and mutations. Cloudflare Access is the authentication layer; do not expose the VPS origin in a way that bypasses it.
+- Logs omit names, emails, program identifiers, credentials, database response bodies, and private NocoDB filter paths.
 
-## Program isolation
+## Runtime requirements
 
-Every event/program has:
+- Node.js 22 or the included Docker image
+- A dedicated NocoDB base
+- Cloudflare Access and a Tunnel/reverse proxy for the public deployment
+- Loops only if transactional referral-code email is enabled
 
-- a database UUID used only on the private/server side;
-- an unguessable public identifier generated from 144 random bits;
-- one active webhook bearer key generated from 256 random bits;
-- a SHA-256 hash of that key in the database—the original key is never stored;
-- its own attendees, referral-code namespace, referral relationships, leaderboard snapshot, webhook URL, and public leaderboard URL.
+There are no npm runtime dependencies.
 
-Email uniqueness and owned-referral-code uniqueness are composite constraints scoped to one program. The same email or readable code may therefore exist independently in two programs. A composite foreign key prevents a referral relationship crossing program boundaries.
+## NocoDB schema
 
-The public program identifier is a capability-like locator, not an authentication secret. It avoids guessable event names and accidental discovery, while the separate webhook key authenticates writes. Rotating the webhook key immediately invalidates the old key without changing the public identifier or URLs.
+Create these two tables before starting the service. Column names are case-sensitive from the API's perspective.
 
-## Privacy and trust boundaries
+### `programs`
 
-- Supabase URL and service-role key exist only in the VPS container environment.
-- Any future public client must never import a Supabase client or receive database credentials.
-- Each public endpoint returns an array whose attendee objects contain **only** `displayName` and `referralCount`.
-- Only attendees with at least one confirmed referral in that program appear.
-- No public response contains emails, codes, internal IDs, webhook hashes, or referring relationships.
-- The organiser dashboard at `/admin` contains personal data and program-management forms. Protect `/admin*` with Cloudflare Access.
-- The backend does not implement another identity/login system; Cloudflare Access is the admin authentication layer.
-- Prefer a Cloudflare Tunnel or firewall rules so visitors cannot bypass Cloudflare and reach the VPS origin directly.
-- Admin create/rotate forms reject browser POSTs whose `Origin` is not listed in `ADMIN_ORIGINS`; privacy layers that send `Origin: null` are accepted only when the `Referer` is an explicitly allowed admin origin.
-- Logs deliberately omit attendee names, emails, program identifiers, credentials, and database IDs.
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `Id` | NocoDB primary key | Yes | Created by NocoDB |
+| `name` | Single line text | Yes | Maximum 120 characters |
+| `public_slug` | Single line text | Yes | Unique; generated by the service |
+| `webhook_secret_hash` | Single line text | Yes | 64 hexadecimal characters |
+| `loops_transactional_id` | Single line text | No | Loops template ID |
+| `active` | Checkbox/boolean | Yes | Default `true` |
+
+### `attendees`
+
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `Id` | NocoDB primary key | Yes | Created by NocoDB |
+| `program_slug` | Single line text | Yes | Program scope |
+| `first_name` | Single line text | Yes | Maximum 100 characters |
+| `last_name` | Single line text | Yes | Maximum 100 characters |
+| `preferred_name` | Single line text | No | Maximum 100 characters |
+| `email` | Email/text | Yes | Stored normalized to lowercase |
+| `email_normalized` | Single line text | Yes | Same normalized value used for lookup |
+| `owned_referral_code` | Single line text | Yes | Random 48-bit suffix |
+| `referral_code_used` | Single line text | No | Saved only when it resolves in the same program |
+
+Add these database constraints. They are the final safeguard against duplicates if more than one backend process ever handles requests:
+
+- mark every column shown as required as `NOT NULL`/required and default `programs.active` to `true`;
+- unique `programs.public_slug`;
+- unique composite `(attendees.program_slug, attendees.email_normalized)`;
+- unique composite `(attendees.program_slug, attendees.owned_referral_code)`.
+
+If the NocoDB UI cannot create composite unique indexes, add them in the underlying database. Until those constraints exist, run exactly one backend replica; the service's in-process signup lock prevents simultaneous duplicate emails only within that replica.
+
+Grant the API token access only to this base and only the metadata/record operations used by the service. Back up the underlying database and test a restore before launch.
+
+## Configuration
+
+Copy `.env.example` to `.env` for local Docker Compose use. In Portainer, store the same values as protected stack environment variables.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `NOCODB_URL` | Yes | NocoDB HTTP(S) base URL |
+| `NOCODB_API_TOKEN` | Yes | Server-only scoped NocoDB token |
+| `NOCODB_PROJECT_ID` | Yes | Base/project ID containing both tables |
+| `HEALTHCHECK_SECRET` | Yes | Independent secret, minimum 32 characters |
+| `PUBLIC_BACKEND_URL` | Yes | Canonical origin; HTTPS is required in production |
+| `ADMIN_ORIGINS` | No | Exact comma-separated origins allowed to submit admin forms; defaults to the backend origin |
+| `PUBLIC_SITE_ORIGINS` | No | Exact comma-separated origins receiving public API CORS headers |
+| `LOOPS_API_KEY` | No | Required only when programs use a Loops template ID |
+| `LEADERBOARD_CACHE_TTL_MS` | No | Backend cache TTL, 1–300 seconds; default 30 seconds |
+| `ADMIN_TITLE` | No | Organiser dashboard heading |
+| `DEBUG_LOGS` | No | Secret-free diagnostics; leave `false` normally |
+
+Startup fails immediately on missing required values, weak health secrets, invalid ports/origins, or a non-HTTPS production backend URL.
+
+## Local verification
+
+```sh
+npm test
+npm run check
+```
+
+To run against a real NocoDB base without TLS locally, set `NODE_ENV=development` and use a local `PUBLIC_BACKEND_URL`. Do not use production data in developer environments.
+
+## Deploy
+
+The supplied Compose service:
+
+- binds only to `127.0.0.1` on the VPS;
+- runs as the unprivileged `node` user;
+- has a read-only filesystem, no Linux capabilities, and `no-new-privileges`;
+- uses process liveness—not an upstream dependency—as its container health check;
+- handles `SIGTERM`/`SIGINT` with a 10-second graceful shutdown window.
+
+Deploy one replica through Portainer or Docker Compose, then route the public hostname to `http://127.0.0.1:3000` through Cloudflare Tunnel or a reverse proxy. Configure Cloudflare as follows:
+
+1. Protect `/admin*` with a self-hosted Access application restricted to the organiser group.
+2. Ensure the VPS origin cannot be reached directly from the internet.
+3. Do not publicly route `/internal/*` or `/health/*` unless an explicit monitor needs them.
+4. Add request/body-size and rate-limit rules for `/api/webhooks/*`, `/api/public/*`, and `/admin/*` appropriate to event traffic.
+5. Preserve the client `Origin` and `Referer` headers used by admin CSRF checks.
+
+The container liveness check calls `/health/live`. Monitor database readiness separately:
+
+```sh
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer YOUR_HEALTHCHECK_SECRET" \
+  https://YOUR-BACKEND/internal/health/db
+```
+
+That readiness route verifies that both required tables can be resolved, have the expected columns, and can be read. Alert on a non-200 response and on structured log events named `request_failed`, `leaderboard_refresh_failed`, `loops_email_failed`, or `server_shutdown_failed`.
 
 ## Organiser workflow
 
-After deployment, an authorised organiser visits `/admin` and enters an event name. The backend:
+Visit the Access-protected dashboard at `/admin`, enter an event name and optionally a Loops Transactional ID, then save the generated webhook key immediately. It cannot be recovered. Rotation invalidates the old key without changing public URLs.
 
-1. creates an unguessable public program identifier;
-2. creates an independent webhook bearer key;
-3. hashes the key before sending it to Supabase;
-4. creates an empty program-scoped leaderboard snapshot;
-5. shows the exact Fillout webhook URL, bearer key, and public leaderboard URL once.
+Configure Fillout to send:
 
-The organiser saves the key into Fillout. Returning to the dashboard cannot reveal it. If it is lost or exposed, “Rotate webhook key” creates a replacement, stores only its hash, and shows the replacement once.
-
-## Signup behaviour
-
-Each generated Fillout endpoint looks like:
-
-```text
-POST https://YOUR-BACKEND/api/webhooks/fillout/UNGUESSABLE_PROGRAM_IDENTIFIER
-Authorization: Bearer ONE_TIME_PROGRAM_KEY
+```http
+POST https://YOUR-BACKEND/api/webhooks/fillout/bp_PROGRAM_IDENTIFIER
+Authorization: Bearer bk_PROGRAM_KEY
+Content-Type: application/json
 ```
-
-Body:
 
 ```json
 {
@@ -82,160 +148,48 @@ Body:
 }
 ```
 
-The backend hashes the presented key and calls one PostgreSQL function. That function authenticates the program/hash pair, then:
+`preferredName` and `referralCodeUsed` may be empty. A referral code may contain only ASCII letters, numbers, `_`, and `-`. Email addresses use a deliberately conservative unquoted-address format so untrusted input cannot alter NocoDB filters.
 
-1. trims and lowercases the email, then checks its uniqueness inside that program (`SEB@x.com` and `seb@x.com` are the same attendee);
-2. ignores the complete later submission if that email already exists in the same program;
-3. resolves the submitted code through the indexed `(program_id, owned_referral_code)` constraint;
-4. creates the attendee and same-program referral relationship atomically;
-5. gives the attendee a code made from up to the first four sanitized first-name characters plus a 12-character random hexadecimal suffix;
-6. retries if the scoped unique constraint ever detects a suffix collision;
-7. regenerates the program's safe JSON leaderboard snapshot in the same transaction.
+Webhook responses:
 
-The random suffix is collision-resistant and database-checked. It is not derived cryptographically from personal data.
-
-Counts are calculated from the attendee records currently in NocoDB, using each attendee's validated `referral_code_used`; there is no mutable referral counter. Every public leaderboard request reads NocoDB again, and every accepted webhook also refreshes that program's in-memory public response cache before returning success. Public responses use `max-age=0, must-revalidate`, so browsers and intermediary caches must check the backend rather than serving an aging response.
-
-## 1. Create the dedicated Supabase data store
-
-Use a clean Supabase project, or a database explicitly isolated for Beacons. In the Supabase SQL editor, run only:
-
-```text
-supabase/migrations/202608230001_beacons.sql
-```
-
-Do not run the legacy SQL dump.
-
-The migration creates:
-
-- `beacons_programs`, including hashed current webhook key;
-- `beacons_attendees`, with program-scoped email/code constraints and same-program referral FK;
-- `beacons_leaderboard_snapshots`, one safe JSON response per program;
-- a diagnostic `beacons_leaderboard` view;
-- `beacons_create_program(...)` and `beacons_rotate_program_secret(...)`;
-- `beacons_get_leaderboard_snapshot(...)`, which returns only an active program's safe cached JSON;
-- `beacons_accept_signup(...)`, with program authentication, duplicate handling, referral assignment, and snapshot refresh in one transaction;
-- `beacons_health_check()`.
-
-Database tables/functions are revoked from Supabase `anon` and `authenticated`. Only the server-side `service_role` can use the Beacons interfaces.
-
-Because this MVP has not been deployed yet, the migration is a clean initial schema rather than an alteration of the earlier single-program draft.
-
-## 2. Configure the backend
-
-On the VPS, copy the example file and fill in real values:
-
-```sh
-cp .env.example .env
-```
-
-| Variable | Purpose |
-| --- | --- |
-| `SUPABASE_URL` | Dedicated Beacons Supabase project URL. Server only. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Dedicated project service-role key. Server only. |
-| `HEALTHCHECK_SECRET` | Independent bearer secret used by Docker/daily scheduler. |
-| `PUBLIC_BACKEND_URL` | Canonical HTTPS backend origin used for generated Fillout and leaderboard URLs. |
-| `ADMIN_ORIGINS` | Comma-separated exact browser origins allowed to submit admin forms, such as `http://localhost:6969` for an SSH tunnel. |
-| `PUBLIC_SITE_ORIGINS` | Optional comma-separated browser origins allowed to read public endpoints. |
-| `ADMIN_TITLE` | Optional dashboard heading. |
-| `DEBUG_LOGS` | Set to `true` temporarily for secret-free request/origin diagnostics; turn it off after debugging. |
-
-Webhook keys are not environment variables. They are generated per program from the protected dashboard and saved only in that program's Fillout setup.
-
-### Run locally
-
-Node 22 has everything the backend needs; there are no runtime packages to install.
-
-```sh
-npm test
-npm run check
-npm start
-```
-
-For local admin form testing, set `PUBLIC_BACKEND_URL=http://localhost:3000`. Without real Supabase credentials, unit and syntax checks run, but database-backed routes correctly report unavailable.
-
-## 3. Deploy with Portainer
-
-The Compose stack binds the container only to VPS loopback at port 3000. Publish it through a reverse proxy or Cloudflare Tunnel.
-
-1. Create a Portainer Stack from `docker-compose.yml`.
-2. Enter the `.env.example` values through Portainer's stack environment UI. Docker Compose CLI loads a local `.env` automatically.
-3. Deploy and confirm container health becomes green.
-4. Route `PUBLIC_BACKEND_URL` to `http://127.0.0.1:3000`.
-5. In Cloudflare Zero Trust, create a self-hosted Access application covering `YOUR-BACKEND/admin*`, limited to the organiser identity group.
-6. Do not broadly publish `/internal/*`. If proxied, retain the secret requirement and add an allowlist where possible.
-
-The service needs one persistent database, not container storage, so the stack has no volume.
-
-## 4. Create a program and connect Fillout
-
-Visit the Cloudflare-protected dashboard:
-
-```text
-GET https://YOUR-BACKEND/admin
-```
-
-Create the event and immediately save the one-time key. Fillout's [official webhook guide](https://www.fillout.com/help/webhook) supports custom bodies and verification headers in Advanced view.
-
-Use the generated program-specific webhook URL, then set:
-
-```text
-Authorization: Bearer [the generated key]
-```
-
-Map the JSON body to the five exact keys shown above. `preferredName` and `referralCodeUsed` may be empty; first name, last name, and email are required.
-
-Expected responses:
-
-- `201` / `created`: new email accepted in that program;
-- `200` / `duplicate_ignored`: later submission for that normalized email in the same program;
-- `400`: invalid body;
+- `201` / `created`: attendee created;
+- `200` / `duplicate_ignored`: normalized email already exists in that program;
+- `400`: invalid JSON or fields;
 - `401`: unknown/inactive program or incorrect key;
-- `503`: temporary database/cache problem, safe to retry.
+- `415`: incorrect content type;
+- `503`: temporary upstream failure; Fillout may retry.
 
-## 5. Public leaderboard API
+Loops delivery is asynchronous after the attendee is saved. A Loops outage does not reject or duplicate the signup; it emits `loops_email_failed`. There is currently no durable email outbox, so organisers must monitor that event and manually recover a missed email from the private dashboard.
 
-The backend exposes a program-scoped public leaderboard endpoint. A future public client can request the program's unguessable public identifier and receive only display names and referral counts. Keep any future client separate from Supabase and do not place database credentials in it.
+## Public leaderboard API
 
-Review states work without a backend:
-
-- `/?demo=loading`
-- `/?demo=empty`
-- `/?demo=error`
-
-All attendee content is inserted using `textContent`, never HTML.
-
-## 6. Schedule the daily database health check
-
-Docker checks the database every 30 seconds. Add one independent daily monitor:
-
-```sh
-curl --fail --silent --show-error \
-  --header "Authorization: Bearer YOUR_HEALTHCHECK_SECRET" \
-  https://YOUR-BACKEND/internal/health/db
+```http
+GET /api/public/programs/:publicId/leaderboard
 ```
 
-Success is `{"ok":true}`. Schedule it in cron, Uptime Kuma, Better Stack, or another monitor and alert on non-200. Store the key in the scheduler's protected secret field when available.
+Example:
 
-## Route summary
+```json
+[
+  { "displayName": "Ali", "referralCount": 3 },
+  { "displayName": "Mia", "referralCount": 1 }
+]
+```
 
-| Route | Audience | Protection | Scope/output |
-| --- | --- | --- | --- |
-| `GET /api/public/programs/:publicId/leaderboard` | Everyone with program URL | Unguessable program identifier + origin-aware CORS | That program; only `displayName`, `referralCount` |
-| `POST /api/webhooks/fillout/:publicId` | Fillout | Program identifier + program bearer key | One program's five signup fields |
-| `GET /admin` | Organisers | Cloudflare Access | All programs, private attendees, scoped leaderboards |
-| `POST /admin/programs` | Organisers | Cloudflare Access + same-origin check | Create program; show key once |
-| `POST /admin/programs/:id/rotate-key` | Organisers | Cloudflare Access + same-origin check | Replace hash; show new key once |
-| `GET /internal/health/db` | Scheduler/container | `HEALTHCHECK_SECRET` | Database readiness only |
-| `GET /health/live` | Local infrastructure | None; do not publicly route | Process liveness only |
+Only attendees with at least one valid same-program referral appear. Responses are calculated from current attendee records, cached in the backend for up to `LEADERBOARD_CACHE_TTL_MS`, and force-refreshed after an accepted signup. Concurrent cache misses share one NocoDB read.
 
-## Before launch
+## Launch checklist
 
-- Apply the migration to a dedicated project and create two test programs through `/admin`.
-- Confirm the same test email can join each program once but cannot join either program twice.
-- Confirm a referral code from one program is ignored in the other.
-- Rotate one webhook key and confirm the old key receives `401`.
-- Verify public JSON contains exactly the two safe attendee fields.
-- Confirm the VPS origin cannot bypass Cloudflare Access for `/admin*`.
-- Add daily health monitoring and privately save each Fillout key.
-- Decide how organisers will privately distribute newly owned referral codes; the MVP creates them and shows them in the organiser dashboard but does not email them.
+- [ ] Create both NocoDB tables, required/not-null rules, and all three unique constraints.
+- [ ] Use a dedicated least-privilege NocoDB token and store all secrets outside Git.
+- [ ] Run `npm test` and `npm run check` in CI.
+- [ ] Create two test programs and verify the same email can join each once, but not either twice.
+- [ ] Verify a referral code from one program is ignored in another.
+- [ ] Rotate a webhook key and verify the old key returns `401`.
+- [ ] Confirm public JSON contains only `displayName` and `referralCount`.
+- [ ] Confirm direct-origin access cannot bypass Cloudflare Access on `/admin*`.
+- [ ] Exercise NocoDB backup restoration.
+- [ ] Configure daily database readiness monitoring, error-log alerts, and Cloudflare rate limits.
+- [ ] Test Loops delivery and document the manual recovery procedure for `loops_email_failed`.
+
+Scratch import scripts are operator tools, are excluded from the production image, and can print personal data. Run them only from a secured workstation. CSV and scratch output files are ignored by Git.

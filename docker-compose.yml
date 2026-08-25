@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    init: true
     restart: unless-stopped
     environment:
       PORT: ${PORT:-3000}
@@ -15,6 +16,7 @@ services:
       PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL}
       ADMIN_ORIGINS: ${ADMIN_ORIGINS}
       PUBLIC_SITE_ORIGINS: ${PUBLIC_SITE_ORIGINS}
+      LEADERBOARD_CACHE_TTL_MS: ${LEADERBOARD_CACHE_TTL_MS:-30000}
       ADMIN_TITLE: ${ADMIN_TITLE:-KiwiHacks Beacons}
       DEBUG_LOGS: ${DEBUG_LOGS:-false}
     ports:
@@ -25,8 +27,7 @@ services:
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/internal/health/db',
-          {headers:{authorization:'Bearer '+process.env.HEALTHCHECK_SECRET}})
+          fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health/live')
           .then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
       interval: 30s
       timeout: 8s
@@ -34,3 +35,9 @@ services:
       start_period: 15s
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    stop_grace_period: 15s

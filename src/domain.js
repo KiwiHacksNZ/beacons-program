@@ -2,7 +2,14 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 const MAX_NAME_LENGTH = 100;
 const MAX_CODE_LENGTH = 64;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAIL_LENGTH = 254;
+// Deliberately excludes NocoDB filter delimiters such as commas, parentheses,
+// and tildes. The service supports normal unquoted mailbox addresses rather
+// than every address permitted by the email RFCs.
+const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+const REFERRAL_CODE_PATTERN = /^[A-Z0-9][A-Z0-9_-]*$/;
+const PUBLIC_SLUG_PATTERN = /^bp_[A-Za-z0-9_-]{24}$/;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
 
 function cleanText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -13,6 +20,11 @@ function firstPresent(payload, keys) {
     if (Object.hasOwn(payload, key)) return payload[key];
   }
   return undefined;
+}
+
+export function isValidReferralCode(value) {
+  const code = cleanText(value).toUpperCase();
+  return code.length > 0 && code.length <= MAX_CODE_LENGTH && REFERRAL_CODE_PATTERN.test(code);
 }
 
 export function validateSignup(payload) {
@@ -34,7 +46,7 @@ export function validateSignup(payload) {
   if (!value.firstName) errors.push("firstName is required.");
   if (!value.lastName) errors.push("lastName is required.");
   if (!value.email) errors.push("email is required.");
-  else if (!EMAIL_PATTERN.test(value.email)) errors.push("email must be valid.");
+  else if (value.email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(value.email)) errors.push("email must be valid.");
 
   for (const [key, input] of Object.entries({
     firstName: value.firstName,
@@ -42,9 +54,12 @@ export function validateSignup(payload) {
     preferredName: value.preferredName,
   })) {
     if (input.length > MAX_NAME_LENGTH) errors.push(`${key} must be ${MAX_NAME_LENGTH} characters or fewer.`);
+    else if (CONTROL_CHARACTER_PATTERN.test(input)) errors.push(`${key} must not contain control characters.`);
   }
   if (value.referralCodeUsed.length > MAX_CODE_LENGTH) {
     errors.push(`referralCodeUsed must be ${MAX_CODE_LENGTH} characters or fewer.`);
+  } else if (value.referralCodeUsed && !isValidReferralCode(value.referralCodeUsed)) {
+    errors.push("referralCodeUsed contains unsupported characters.");
   }
 
   return errors.length ? { ok: false, errors } : { ok: true, value };
@@ -54,7 +69,25 @@ export function validateProgramName(value) {
   const name = cleanText(value);
   if (!name) return { ok: false, error: "Program name is required." };
   if (name.length > 120) return { ok: false, error: "Program name must be 120 characters or fewer." };
+  if (CONTROL_CHARACTER_PATTERN.test(name)) return { ok: false, error: "Program name must not contain control characters." };
   return { ok: true, value: name };
+}
+
+export function validateLoopsTransactionalId(value) {
+  const id = cleanText(value);
+  if (!id) return { ok: true, value: null };
+  if (id.length > 128 || !/^[A-Za-z0-9_-]+$/.test(id)) {
+    return { ok: false, error: "Loops Transactional ID must use only letters, numbers, hyphens, and underscores." };
+  }
+  return { ok: true, value: id };
+}
+
+export function isValidPublicSlug(value) {
+  return PUBLIC_SLUG_PATTERN.test(String(value || ""));
+}
+
+export function isValidRecordId(value) {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(String(value || ""));
 }
 
 export function createProgramCredentials() {
@@ -68,17 +101,14 @@ export function hashSecret(secret) {
   return createHash("sha256").update(String(secret)).digest("hex");
 }
 
-export function generateRefCode(firstName, lastName, email) {
-  const fName = String(firstName || "").trim();
-  const lName = String(lastName || "").trim();
-  const em = String(email || "").trim();
-  const currentTimeSec = Math.floor(Date.now() / 1000);
-  
-  const rawData = `${fName}${lName}${em}${currentTimeSec}`.toLowerCase();
-  const hashStr = createHash("sha256").update(rawData).digest("hex").slice(0, 5);
-  
-  const prefix = fName.length >= 3 ? fName.slice(0, 3) : fName.padEnd(3, "x");
-  return `${prefix}-${hashStr}`.toUpperCase();
+export function generateRefCode(firstName) {
+  const normalizedName = String(firstName || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  const prefix = (normalizedName || "JOIN").slice(0, 4).padEnd(3, "X");
+  return `${prefix}-${randomBytes(6).toString("hex").toUpperCase()}`;
 }
 
 export function bearerToken(headerValue) {
@@ -121,12 +151,16 @@ export function toPublicLeaderboard(rows) {
 }
 
 export function parseAllowedOrigins(value) {
-  return new Set(
-    String(value || "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean),
-  );
+  const origins = new Set();
+  for (const item of String(value || "").split(",")) {
+    const candidate = item.trim();
+    if (!candidate) continue;
+    try {
+      const url = new URL(candidate);
+      if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password) origins.add(url.origin);
+    } catch {}
+  }
+  return origins;
 }
 
 export function escapeHtml(value) {

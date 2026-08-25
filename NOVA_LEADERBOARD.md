@@ -29,7 +29,7 @@ The API returns a JSON array of attendees, already sorted by `referral_count` (d
 
 **Notes for Frontend Developers:**
 - You do **not** need to send any Authorization headers for this endpoint.
-- CORS is explicitly allowed for `https://beacons.kiwihacks.com`, so you can `fetch()` this directly from the browser without running into cross-origin blocks.
+- Ensure `https://beacons.kiwihacks.com` is present in the backend's `PUBLIC_SITE_ORIGINS`; the browser can then `fetch()` this endpoint directly.
 - **Privacy:** Only `displayName` and `referralCount` are exposed. No emails or raw referral codes are ever returned by this endpoint.
 
 ---
@@ -57,7 +57,7 @@ Map your Fillout form fields to construct this exact JSON body:
   "lastName": "Example",
   "preferredName": "Ali",
   "email": "alice@example.com",
-  "referralCodeUsed": "KIWI-A1B2C"
+  "referralCodeUsed": "KIWI-A1B2C3D4E5F6"
 }
 ```
 

@@ -47,3 +47,16 @@ test("Joined displays NocoDB's automatic CreatedAt timestamp", () => {
   assert.match(html, /datetime="2026-08-25T01:30:00\.000Z"/);
   assert.doesNotMatch(html, />Unknown</);
 });
+
+test("rotation forms use NocoDB's uppercase Id field", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [{ Id: 42, name: "Nova", public_slug: "bp_program", active: true }],
+    attendees: [],
+    leaderboardsByProgram: new Map([["bp_program", []]]),
+  });
+
+  assert.match(html, /action="\/admin\/programs\/42\/rotate-key"/);
+  assert.doesNotMatch(html, /programs\/undefined/);
+});

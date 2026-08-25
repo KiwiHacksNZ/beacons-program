@@ -2,6 +2,7 @@
 .env
 node_modules
 test
+scratch
 public-site
 currentdb-DO_NOT-COMMIT.sql
 currentdb-DO_NOT_COMMIT.sql

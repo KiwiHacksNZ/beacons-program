@@ -1,5 +1,10 @@
 import { toPublicLeaderboard } from "./domain.js";
 
+const REQUIRED_COLUMNS = {
+  programs: ["Id", "name", "public_slug", "webhook_secret_hash", "loops_transactional_id", "active"],
+  attendees: ["Id", "program_slug", "first_name", "last_name", "preferred_name", "email", "email_normalized", "owned_referral_code", "referral_code_used"],
+};
+
 export function createNocoDBClient({ url, apiToken, projectId }) {
   const baseUrl = String(url || "").replace(/\/$/, "");
 
@@ -17,11 +22,9 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
     const text = await response.text();
     const body = text ? safeJson(text) : null;
     if (!response.ok) {
-      if (!body || body.message === "NocoDB returned an unreadable response.") {
-        console.error(`NocoDB Error Text for ${path}:`, text);
-      }
-      const detail = body?.message || body?.msg || body?.error || `NocoDB returned ${response.status}`;
-      throw new Error(detail);
+      // Do not log the path or upstream body here: filter paths can contain
+      // attendee email addresses and NocoDB errors may echo private fields.
+      throw new Error(`NocoDB request failed with status ${response.status}.`);
     }
     return body;
   }
@@ -59,6 +62,18 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       offset += limit;
     }
     return records;
+  }
+
+  async function verifyTableSchema(tableName, tableId) {
+    const metadata = await request(`/api/v2/meta/tables/${tableId}`);
+    const columns = new Set();
+    for (const column of metadata?.columns || []) {
+      if (column.title) columns.add(column.title);
+      if (column.column_name) columns.add(column.column_name);
+    }
+    if (!REQUIRED_COLUMNS[tableName].every((column) => columns.has(column))) {
+      throw new Error(`NocoDB table ${tableName} does not match the required schema.`);
+    }
   }
 
   return {
@@ -168,7 +183,14 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
 
     async healthCheck() {
       try {
-        const res = await request(`/api/v2/meta/bases`);
+        const programsTableId = await resolveTableId("programs");
+        const attendeesTableId = await resolveTableId("attendees");
+        await Promise.all([
+          verifyTableSchema("programs", programsTableId),
+          verifyTableSchema("attendees", attendeesTableId),
+          request(`/api/v2/tables/${programsTableId}/records?limit=1`),
+          request(`/api/v2/tables/${attendeesTableId}/records?limit=1`),
+        ]);
         return { ok: true };
       } catch (e) {
         return { ok: false, error: e.message };

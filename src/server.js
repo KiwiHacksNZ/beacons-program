@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
-import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup, generateRefCode } from "./domain.js";
+import { readConfig } from "./config.js";
+import { bearerToken, createProgramCredentials, generateRefCode, hashSecret, isBearerAuthorized, isValidPublicSlug, isValidRecordId, parseAllowedOrigins, securelyMatches, validateLoopsTransactionalId, validateProgramName, validateSignup } from "./domain.js";
 import { createLeaderboardCache } from "./leaderboard-cache.js";
 import { createNocoDBClient } from "./nocodb.js";
 
@@ -12,6 +13,7 @@ const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
 const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
 const leaderboardCache = createLeaderboardCache({ loadLeaderboard: (program) => db.getLeaderboard(program) });
+const backgroundTasks = new Set();
 
 async function refreshLeaderboard(program) {
   return leaderboardCache.refresh(program);
@@ -45,14 +47,13 @@ function isAllowedAdminRequest(request) {
     } catch {}
   }
 
-  // Modern browsers send Sec-Fetch-Site: same-origin for same-site requests
-  if (request.headers["sec-fetch-site"] === "same-origin") return true;
-
   return false;
 }
 
 const server = createServer(async (request, response) => {
-  const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  // Route only on the origin-form request target. The externally configured
+  // canonical URL is used for generated links, never the untrusted Host header.
+  const url = new URL(request.url || "/", "http://localhost");
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
   const webhookMatch = url.pathname.match(/^\/api\/webhooks\/fillout\/([^/]+)$/);
   const rotateMatch = url.pathname.match(/^\/admin\/programs\/([^/]+)\/rotate-key$/i);
@@ -62,9 +63,11 @@ const server = createServer(async (request, response) => {
       ? "/api/webhooks/fillout/:program"
       : rotateMatch
         ? "/admin/programs/:program/rotate-key"
-        : url.pathname;
+        : ["/admin", "/admin/", "/admin/programs", "/admin/styles.css", "/internal/health/db", "/health/live"].includes(url.pathname)
+          ? url.pathname
+          : "unmatched";
 
-  debug("request_start", { method: request.method, path: url.pathname, route: routeName, origin: request.headers.origin || null, host: request.headers.host || null });
+  debug("request_start", { method: request.method, route: routeName, origin: request.headers.origin || null, host: request.headers.host || null });
 
   try {
     if (request.method === "OPTIONS" && publicMatch) {
@@ -76,11 +79,13 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && publicMatch) {
       debug("public_leaderboard", { method: request.method });
       applyCors(request, response);
-      const programSlug = decodeURIComponent(publicMatch[1]);
-      const program = await db.getProgramBySlug(programSlug);
-      // Read NocoDB on every public request so manual database changes and
-      // changes made by another backend instance are visible immediately.
-      const cached = await refreshLeaderboard(program);
+      const programSlug = publicMatch[1];
+      if (!isValidPublicSlug(programSlug)) { sendJson(response, 404, { error: "Program not found" }); return; }
+      let cached = leaderboardCache.getFresh(programSlug, config.leaderboardCacheTtlMs);
+      if (!cached) {
+        const program = await db.getProgramBySlug(programSlug);
+        cached = await leaderboardCache.getOrRefresh(program, config.leaderboardCacheTtlMs);
+      }
       if (!cached) { sendJson(response, 404, { error: "Program not found" }); return; }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
       response.end(cached.body);
@@ -88,15 +93,17 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && webhookMatch) {
+      if (!hasContentType(request, "application/json")) { sendJson(response, 415, { error: "Content-Type must be application/json" }); return; }
       const secret = bearerToken(request.headers.authorization);
       debug("webhook_received", { method: request.method, hasAuthorization: Boolean(secret), authorizationLength: secret.length });
       if (secret.length < 32) { sendJson(response, 401, { error: "Unauthorized" }); return; }
-      const programSlug = decodeURIComponent(webhookMatch[1]);
+      const programSlug = webhookMatch[1];
+      if (!isValidPublicSlug(programSlug)) { sendJson(response, 401, { error: "Unauthorized" }); return; }
       const payload = await readJsonBody(request, 128 * 1024);
       const validated = validateSignup(payload);
       if (!validated.ok) { sendJson(response, 400, { error: "Invalid submission", details: validated.errors }); return; }
       const program = await db.getProgramBySlug(programSlug);
-      if (!program || program.webhook_secret_hash !== hashSecret(secret)) {
+      if (!program || !securelyMatches(hashSecret(secret), program.webhook_secret_hash)) {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
       }
@@ -105,7 +112,13 @@ const server = createServer(async (request, response) => {
       const result = await db.acceptSignup(program, validated.value, generatedRefCode);
       debug("webhook_database_result", { authorized: Boolean(result?.authorized), accepted: Boolean(result?.accepted), referralApplied: Boolean(result?.referral_applied) });
       if (!result?.authorized) { sendJson(response, 401, { error: "Unauthorized" }); return; }
-      await refreshLeaderboard(program);
+      try {
+        await refreshLeaderboard(program);
+      } catch {
+        // The signup is already durable. A public read will retry the refresh;
+        // do not make Fillout retry a successfully created attendee.
+        log("error", "leaderboard_refresh_failed");
+      }
       if (!result.accepted) {
         log("info", "signup_duplicate_ignored");
         sendJson(response, 200, { accepted: false, status: "duplicate_ignored" });
@@ -115,9 +128,11 @@ const server = createServer(async (request, response) => {
       
       if (result.loops_transactional_id && config.loopsApiKey) {
         const firstName = validated.value.preferredName || validated.value.firstName;
-        sendLoopsEmail(validated.value.email, firstName, result.owned_referral_code, result.loops_transactional_id)
-          .then(() => log("info", "loops_email_sent", { email: validated.value.email }))
-          .catch(err => log("error", "loops_email_failed", { email: validated.value.email, error: err.message }));
+        runInBackground(
+          sendLoopsEmail(validated.value.email, firstName, result.owned_referral_code, result.loops_transactional_id)
+            .then(() => log("info", "loops_email_sent"))
+            .catch(() => log("error", "loops_email_failed")),
+        );
       }
 
       sendJson(response, 201, { accepted: true, status: "created", referralApplied: Boolean(result.referral_applied) });
@@ -144,12 +159,15 @@ const server = createServer(async (request, response) => {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
+      if (!hasContentType(request, "application/x-www-form-urlencoded")) { sendAdminHtml(response, 415, renderAdminError({ title: "Program not created", message: "Unsupported form content type.", status: 415 })); return; }
       const form = await readFormBody(request, 16 * 1024);
       const validated = validateProgramName(form.get("name"));
-      const loopsTransactionalId = form.get("loopsTransactionalId") || null;
+      const loopsId = validateLoopsTransactionalId(form.get("loopsTransactionalId"));
       if (!validated.ok) { sendAdminHtml(response, 400, renderAdminError({ title: "Program not created", message: validated.error })); return; }
+      if (!loopsId.ok) { sendAdminHtml(response, 400, renderAdminError({ title: "Program not created", message: loopsId.error })); return; }
+      if (loopsId.value && !config.loopsApiKey) { sendAdminHtml(response, 400, renderAdminError({ title: "Program not created", message: "Configure LOOPS_API_KEY before enabling a Loops template." })); return; }
       const credentials = createProgramCredentials();
-      const program = await db.createProgram({ name: validated.value, publicSlug: credentials.publicSlug, webhookSecretHash: hashSecret(credentials.webhookSecret), loopsTransactionalId });
+      const program = await db.createProgram({ name: validated.value, publicSlug: credentials.publicSlug, webhookSecretHash: hashSecret(credentials.webhookSecret), loopsTransactionalId: loopsId.value });
       debug("admin_program_created", { databaseAccepted: Boolean(program?.Id || program?.id) });
       sendAdminHtml(response, 201, renderProgramSecret({ mode: "created", programName: program.name, ...programUrls(program.public_slug), secret: credentials.webhookSecret }));
       return;
@@ -161,6 +179,8 @@ const server = createServer(async (request, response) => {
         sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
         return;
       }
+      if (!isValidRecordId(rotateMatch[1])) { sendAdminHtml(response, 404, renderAdminError({ title: "Program not found", message: "The webhook key was not changed.", status: 404 })); return; }
+      if (!hasContentType(request, "application/x-www-form-urlencoded")) { sendAdminHtml(response, 415, renderAdminError({ title: "Webhook key not changed", message: "Unsupported form content type.", status: 415 })); return; }
       await readFormBody(request, 1024);
       const credentials = createProgramCredentials();
       const program = await db.rotateProgramSecret({ programId: rotateMatch[1], webhookSecretHash: hashSecret(credentials.webhookSecret) });
@@ -180,7 +200,7 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health/live") { sendJson(response, 200, { ok: true }); return; }
     sendJson(response, 404, { error: "Not found" });
   } catch (error) {
-  log("error", "request_failed", { path: routeName, message: error.message, method: request.method, origin: request.headers.origin || null });
+    log("error", "request_failed", { route: routeName, message: error.message, method: request.method, origin: request.headers.origin || null });
     const status = error.statusCode || 503;
     if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: "Service unavailable", message: status === 413 ? error.message : "The database request did not complete. Please try again.", status }));
     else sendJson(response, status, { error: status === 413 || status === 400 ? error.message : "Service temporarily unavailable" });
@@ -191,11 +211,17 @@ server.listen(config.port, "0.0.0.0", () => {
   log("info", "server_listening", { port: config.port, publicBackendUrl: config.publicBackendUrl, adminOrigins: [...allowedAdminOrigins], publicSiteOrigins: [...allowedOrigins], debugLogs: config.debugLogs });
 });
 
-function readConfig() {
-  const required = ["NOCODB_URL", "NOCODB_API_TOKEN", "NOCODB_PROJECT_ID", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
-  const missing = required.filter((key) => !process.env[key]);
-  if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
-  return { port: Number(process.env.PORT || 3000), nocodbUrl: process.env.NOCODB_URL, nocodbApiToken: process.env.NOCODB_API_TOKEN, nocodbProjectId: process.env.NOCODB_PROJECT_ID, healthcheckSecret: process.env.HEALTHCHECK_SECRET, publicBackendUrl: process.env.PUBLIC_BACKEND_URL.replace(/\/$/, ""), publicSiteOrigins: process.env.PUBLIC_SITE_ORIGINS || "", adminOrigins: process.env.ADMIN_ORIGINS || process.env.PUBLIC_BACKEND_URL, adminTitle: process.env.ADMIN_TITLE || "KiwiHacks Beacons", debugLogs: process.env.DEBUG_LOGS === "true", loopsApiKey: process.env.LOOPS_API_KEY || "" };
+server.headersTimeout = 10_000;
+server.requestTimeout = 15_000;
+server.keepAliveTimeout = 5_000;
+server.maxRequestsPerSocket = 1_000;
+server.on("error", (error) => {
+  log("error", "server_error", { message: error.message });
+  if (!server.listening) process.exitCode = 1;
+});
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => shutdown(signal));
 }
 
 function programUrls(programSlug) {
@@ -205,13 +231,14 @@ function programUrls(programSlug) {
 
 function applyCors(request, response) {
   const origin = request.headers.origin;
-  if (origin && allowedOrigins.has(origin)) { response.setHeader("access-control-allow-origin", origin); response.setHeader("vary", "Origin"); }
+  response.setHeader("vary", "Origin");
+  if (origin && allowedOrigins.has(origin)) response.setHeader("access-control-allow-origin", origin);
   response.setHeader("access-control-allow-methods", "GET, OPTIONS");
   response.setHeader("access-control-allow-headers", "Content-Type");
 }
 
 function sendJson(response, status, body) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" });
   response.end(JSON.stringify(body));
 }
 
@@ -226,6 +253,10 @@ async function readJsonBody(request, maxBytes) {
 }
 
 async function readFormBody(request, maxBytes) { return new URLSearchParams(await readBody(request, maxBytes)); }
+
+function hasContentType(request, expected) {
+  return String(request.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase() === expected;
+}
 
 async function readBody(request, maxBytes) {
   let size = 0;
@@ -258,6 +289,24 @@ async function sendLoopsEmail(email, firstName, refCode, transactionalId) {
     signal: AbortSignal.timeout(5000)
   });
   if (!response.ok) {
-    throw new Error(`Loops returned ${response.status}: ${await response.text()}`);
+    await response.body?.cancel();
+    throw new Error(`Loops request failed with status ${response.status}.`);
   }
+}
+
+function runInBackground(promise) {
+  backgroundTasks.add(promise);
+  promise.finally(() => backgroundTasks.delete(promise));
+}
+
+function shutdown(signal) {
+  log("info", "server_shutdown_started", { signal });
+  const forceExit = setTimeout(() => process.exit(1), 10_000);
+  forceExit.unref();
+  server.close(async (error) => {
+    await Promise.allSettled([...backgroundTasks]);
+    clearTimeout(forceExit);
+    if (error) log("error", "server_shutdown_failed", { message: error.message });
+    process.exitCode = error ? 1 : 0;
+  });
 }
