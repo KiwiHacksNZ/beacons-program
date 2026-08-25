@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
 import { bearerToken, createProgramCredentials, hashSecret, isBearerAuthorized, parseAllowedOrigins, validateProgramName, validateSignup, generateRefCode } from "./domain.js";
+import { createLeaderboardCache } from "./leaderboard-cache.js";
 import { createNocoDBClient } from "./nocodb.js";
 
 const config = readConfig();
@@ -10,16 +11,10 @@ const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
 const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
 const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
-const leaderboardCache = new Map();
+const leaderboardCache = createLeaderboardCache({ loadLeaderboard: (program) => db.getLeaderboard(program) });
 
 async function refreshLeaderboard(program) {
-  if (!program) return null;
-  const programSlug = program.public_slug;
-  const leaderboard = await db.getLeaderboard(program);
-  if (leaderboard === null) return null;
-  const cached = { body: JSON.stringify(leaderboard), refreshedAt: Date.now() };
-  leaderboardCache.set(programSlug, cached);
-  return cached;
+  return leaderboardCache.refresh(program);
 }
 
 function log(level, event, details = {}) {
@@ -83,7 +78,9 @@ const server = createServer(async (request, response) => {
       applyCors(request, response);
       const programSlug = decodeURIComponent(publicMatch[1]);
       const program = await db.getProgramBySlug(programSlug);
-      const cached = leaderboardCache.get(programSlug) || (await refreshLeaderboard(program));
+      // Read NocoDB on every public request so manual database changes and
+      // changes made by another backend instance are visible immediately.
+      const cached = await refreshLeaderboard(program);
       if (!cached) { sendJson(response, 404, { error: "Program not found" }); return; }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=0, must-revalidate", "x-content-type-options": "nosniff" });
       response.end(cached.body);

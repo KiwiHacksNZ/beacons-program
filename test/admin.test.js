@@ -27,3 +27,22 @@ test("admin dashboard escapes private database values", () => {
   assert.match(html, /Nova &lt;2027&gt;/);
   assert.doesNotMatch(html, /<Alice>|<Ali>|onmouseover="alert/);
 });
+
+test("Joined displays NocoDB's automatic CreatedAt timestamp", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [{ id: 1, name: "Nova", public_slug: "bp_program", active: true }],
+    attendees: [{
+      program_slug: "bp_program",
+      first_name: "Alice",
+      last_name: "Example",
+      email: "alice@example.com",
+      CreatedAt: "2026-08-25T01:30:00.000Z",
+    }],
+    leaderboardsByProgram: new Map([["bp_program", []]]),
+  });
+
+  assert.match(html, /datetime="2026-08-25T01:30:00\.000Z"/);
+  assert.doesNotMatch(html, />Unknown</);
+});

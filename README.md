@@ -84,7 +84,7 @@ Body:
 
 The backend hashes the presented key and calls one PostgreSQL function. That function authenticates the program/hash pair, then:
 
-1. checks normalized email uniqueness inside that program;
+1. trims and lowercases the email, then checks its uniqueness inside that program (`SEB@x.com` and `seb@x.com` are the same attendee);
 2. ignores the complete later submission if that email already exists in the same program;
 3. resolves the submitted code through the indexed `(program_id, owned_referral_code)` constraint;
 4. creates the attendee and same-program referral relationship atomically;
@@ -94,7 +94,7 @@ The backend hashes the presented key and calls one PostgreSQL function. That fun
 
 The random suffix is collision-resistant and database-checked. It is not derived cryptographically from personal data.
 
-Counts come from confirmed referral relationships, not a mutable counter. After a valid webhook response, the backend also reloads that program's in-memory response cache. A temporary reload failure yields an error so Fillout can retry; the database operation remains first-email-wins and idempotent.
+Counts are calculated from the attendee records currently in NocoDB, using each attendee's validated `referral_code_used`; there is no mutable referral counter. Every public leaderboard request reads NocoDB again, and every accepted webhook also refreshes that program's in-memory public response cache before returning success. Public responses use `max-age=0, must-revalidate`, so browsers and intermediary caches must check the backend rather than serving an aging response.
 
 ## 1. Create the dedicated Supabase data store
 

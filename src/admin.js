@@ -14,11 +14,12 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
   const attendeeRows = attendees.length
     ? attendees.map((attendee) => {
       const program = programMap.get(attendee.program_slug);
+      const joinedAt = attendee.CreatedAt || attendee.created_at || attendee.createdAt;
       return `<tr>
         <td>${text(program?.name || "Unknown program")}</td><td>${text(attendee.first_name)}</td><td>${text(attendee.last_name)}</td>
         <td><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a></td><td>${text(attendee.preferred_name)}</td>
         <td><code>${text(attendee.owned_referral_code)}</code></td><td><code>${text(attendee.referral_code_used)}</code></td>
-        <td><time datetime="${escapeHtml(attendee.created_at)}">${escapeHtml(formatDate(attendee.created_at))}</time></td>
+        <td>${renderJoinedAt(joinedAt)}</td>
       </tr>`;
     }).join("")
     : '<tr><td colspan="8" class="empty">No accepted signups yet.</td></tr>';
@@ -71,6 +72,11 @@ export function renderAdminError({ title, message, status = 400 }) {
 function renderLeaders(leaders) {
   if (!leaders.length) return '<p class="empty">No confirmed referrals yet.</p>';
   return `<ol class="mini-leaders">${leaders.map((person, index) => `<li><span>${index + 1}</span><strong>${escapeHtml(person.displayName)}</strong><small>${person.referralCount} referral${person.referralCount === 1 ? "" : "s"}</small></li>`).join("")}</ol>`;
+}
+
+function renderJoinedAt(value) {
+  if (!value) return '<span class="muted">—</span>';
+  return `<time datetime="${escapeHtml(value)}">${escapeHtml(formatDate(value))}</time>`;
 }
 
 function formatDate(value) {
