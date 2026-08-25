@@ -216,7 +216,7 @@ function sendJson(response, status, body) {
 }
 
 function sendAdminHtml(response, status, body) {
-  response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store", "content-security-policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'", "referrer-policy": "same-origin", "x-content-type-options": "nosniff", "x-frame-options": "DENY" });
+  response.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store, no-transform", "content-security-policy": "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'", "referrer-policy": "same-origin", "x-content-type-options": "nosniff", "x-frame-options": "DENY" });
   response.end(body);
 }
 

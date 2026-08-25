@@ -17,7 +17,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
       const joinedAt = attendee.CreatedAt || attendee.created_at || attendee.createdAt;
       return `<tr>
         <td>${text(program?.name || "Unknown program")}</td><td>${text(attendee.first_name)}</td><td>${text(attendee.last_name)}</td>
-        <td><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a></td><td>${text(attendee.preferred_name)}</td>
+        <td><!--email_off--><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a><!--/email_off--></td><td>${text(attendee.preferred_name)}</td>
         <td><code>${text(attendee.owned_referral_code)}</code></td><td><code>${text(attendee.referral_code_used)}</code></td>
         <td>${renderJoinedAt(joinedAt)}</td>
       </tr>`;

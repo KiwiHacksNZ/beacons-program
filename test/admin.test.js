@@ -25,6 +25,7 @@ test("admin dashboard escapes private database values", () => {
   assert.match(html, /&lt;Alice&gt;/);
   assert.match(html, /&lt;Ali&gt;/);
   assert.match(html, /Nova &lt;2027&gt;/);
+  assert.match(html, /<!--email_off--><a href="mailto:alice@example\.com&quot; onmouseover=&quot;alert\(1\)">/);
   assert.doesNotMatch(html, /<Alice>|<Ali>|onmouseover="alert/);
 });
 
