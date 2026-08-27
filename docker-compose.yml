@@ -40,4 +40,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid,nodev
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     stop_grace_period: 15s

@@ -1,122 +1,166 @@
 # KiwiHacks Beacons
 
-A small, dependency-free Node.js service for program-scoped referral signups and leaderboards. The backend is the only component that talks to NocoDB. Fillout submits authenticated webhooks, Loops can deliver each attendee's referral code, and organisers manage programs through a Cloudflare Access-protected dashboard.
+Beacons is the private backend for KiwiHacks program signups, referral codes, and public leaderboards. Fillout sends authenticated signups to the service, the service stores them in NocoDB, and Loops can email each accepted attendee their referral code. Organisers create programs and rotate webhook keys through a Cloudflare Access-protected dashboard.
 
-## Architecture and trust boundaries
+The service is deliberately small: it runs on Node.js 22, has no npm runtime dependencies, and ships as a locked-down Docker container.
+
+## How it fits together
 
 ```text
-Fillout ── program URL + bearer key ──▶ Node backend ── server token ──▶ NocoDB
-                                             │
-Public site ◀── safe leaderboard JSON ────────┤
-                                             ├──▶ Loops transactional email
-Organisers ── Cloudflare Access ───────────▶ /admin
-Monitor ── independent bearer secret ─────▶ /internal/health/db
+Fillout ── authenticated webhook ──▶ Beacons ── server token ──▶ NocoDB
+                                         │
+Nova/public site ◀── leaderboard JSON ───┤
+                                         ├──▶ Loops email
+Organisers ── Cloudflare Access ────────▶ /admin
+Monitor ── independent bearer token ───▶ /internal/health/db
 ```
 
-- NocoDB and Loops credentials exist only in the backend environment.
-- Each program has a 144-bit random public identifier and a separate 256-bit webhook key.
-- Only the SHA-256 hash of a webhook key is stored. The original is shown once.
-- Public leaderboard rows contain exactly `displayName` and `referralCount`.
-- `/admin*` exposes personal data and mutations. Cloudflare Access is the authentication layer; do not expose the VPS origin in a way that bypasses it.
-- Logs omit names, emails, program identifiers, credentials, database response bodies, and private NocoDB filter paths.
+Only Beacons should write to the two NocoDB tables. Database credentials, Loops credentials, and webhook-key hashes remain server-side. Public leaderboard responses contain only a display name and referral count.
 
-## Runtime requirements
+## Production readiness
 
-- Node.js 22 or the included Docker image
-- A dedicated NocoDB base
-- Cloudflare Access and a Tunnel/reverse proxy for the public deployment
-- Loops only if transactional referral-code email is enabled
+This repository is ready for a limited, small-event production deployment once the hard launch gates below are complete. Its integrity model is intentionally server-side rather than database-enforced.
 
-There are no npm runtime dependencies.
+Hard launch gates:
 
-## NocoDB schema
+- run exactly one Node.js process/container;
+- do not configure multiple replicas or Node cluster workers;
+- do not create or edit program and attendee records directly in NocoDB;
+- route every mutation through this service; and
+- protect `/admin*` with Cloudflare Access and prevent direct access to the VPS origin;
+- store real secrets outside Git and use a base-scoped NocoDB token;
+- confirm `/health/live` and authenticated `/internal/health/db` both succeed; and
+- complete a signup, duplicate-signup, cross-program referral, and backup/restore smoke test.
 
-Create these two tables before starting the service. Column names are case-sensitive from the API's perspective.
+Within one process, signups for the same normalized email and program are serialized before the NocoDB insert. The service also validates names, email addresses, referral formats, program scope, and webhook credentials.
+
+Known limitations accepted by this deployment profile:
+
+- database `NOT NULL`, composite uniqueness, checks, and foreign keys are not relied upon;
+- the readiness endpoint verifies schema shape and connectivity, not indexes or relational constraints;
+- Loops email delivery has no durable retry queue; and
+- the application trusts Cloudflare Access for admin authentication and must not have a bypassable origin.
+
+If the service is ever horizontally scaled or another writer is introduced, first add PostgreSQL composite unique indexes on:
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS attendees_program_email_uidx
+  ON attendees (program_slug, email_normalized);
+
+CREATE UNIQUE INDEX IF NOT EXISTS attendees_program_owned_code_uidx
+  ON attendees (program_slug, owned_referral_code);
+```
+
+Database foreign keys and format checks are also worthwhile defence in depth, but they are not required for the documented single-writer deployment.
+
+## NocoDB setup
+
+Create a base containing the following tables. Field names are case-sensitive to the API.
 
 ### `programs`
 
-| Column | Type | Required | Notes |
+| Field | NocoDB type | Application requirement | Default and rules |
 | --- | --- | --- | --- |
-| `Id` | NocoDB primary key | Yes | Created by NocoDB |
+| `Id` | ID | Yes | NocoDB primary key |
 | `name` | Single line text | Yes | Maximum 120 characters |
-| `public_slug` | Single line text | Yes | Unique; generated by the service |
-| `webhook_secret_hash` | Single line text | Yes | 64 hexadecimal characters |
-| `loops_transactional_id` | Single line text | No | Loops template ID |
-| `active` | Checkbox/boolean | Yes | Default `true` |
+| `public_slug` | Single line text | Yes | Enable **Unique values only** |
+| `webhook_secret_hash` | Single line text | Yes | Written by the service |
+| `loops_transactional_id` | Single line text | No | Leave the default blank |
+| `active` | Checkbox | Yes | Default `true` |
 
 ### `attendees`
 
-| Column | Type | Required | Notes |
+| Field | NocoDB type | Application requirement | Default and rules |
 | --- | --- | --- | --- |
-| `Id` | NocoDB primary key | Yes | Created by NocoDB |
+| `Id` | ID | Yes | NocoDB primary key |
 | `program_slug` | Single line text | Yes | Program scope |
 | `first_name` | Single line text | Yes | Maximum 100 characters |
 | `last_name` | Single line text | Yes | Maximum 100 characters |
-| `preferred_name` | Single line text | No | Maximum 100 characters |
-| `email` | Email/text | Yes | Stored normalized to lowercase |
-| `email_normalized` | Single line text | Yes | Same normalized value used for lookup |
-| `owned_referral_code` | Single line text | Yes | Random 48-bit suffix |
-| `referral_code_used` | Single line text | No | Saved only when it resolves in the same program |
+| `preferred_name` | Single line text | No | Leave the default blank |
+| `email` | Email or single line text | Yes | Stored lowercase |
+| `email_normalized` | Single line text | Yes | Duplicate-check value |
+| `owned_referral_code` | Single line text | Yes | Generated by the service |
+| `referral_code_used` | Single line text | No | Leave the default blank |
 
-Add these database constraints. They are the final safeguard against duplicates if more than one backend process ever handles requests:
+In NocoDB, a blank default means “no default”; optional values sent by the service are stored as database `NULL`. Do not enter the literal text `NULL` as a default. Do not mark `email_normalized` or `owned_referral_code` individually unique: their intended uniqueness is scoped to one program.
 
-- mark every column shown as required as `NOT NULL`/required and default `programs.active` to `true`;
-- unique `programs.public_slug`;
-- unique composite `(attendees.program_slug, attendees.email_normalized)`;
-- unique composite `(attendees.program_slug, attendees.owned_referral_code)`.
+Marking the required fields as **Not Null** and enabling **Unique values only** for `public_slug` are recommended defence in depth. They are not a substitute for the composite indexes required before multiple writers or replicas are allowed.
 
-If the NocoDB UI cannot create composite unique indexes, add them in the underlying database. Until those constraints exist, run exactly one backend replica; the service's in-process signup lock prevents simultaneous duplicate emails only within that replica.
-
-Grant the API token access only to this base and only the metadata/record operations used by the service. Back up the underlying database and test a restore before launch.
+Use a dedicated NocoDB API token restricted to this base. The service needs table metadata plus record read/write access.
 
 ## Configuration
 
-Copy `.env.example` to `.env` for local Docker Compose use. In Portainer, store the same values as protected stack environment variables.
+Copy `.env.example` to `.env` for local Compose deployment, or add the same values as protected stack variables in Portainer. Never commit `.env`.
 
-| Variable | Required | Purpose |
+| Variable | Required | Description |
 | --- | --- | --- |
-| `NOCODB_URL` | Yes | NocoDB HTTP(S) base URL |
-| `NOCODB_API_TOKEN` | Yes | Server-only scoped NocoDB token |
-| `NOCODB_PROJECT_ID` | Yes | Base/project ID containing both tables |
-| `HEALTHCHECK_SECRET` | Yes | Independent secret, minimum 32 characters |
-| `PUBLIC_BACKEND_URL` | Yes | Canonical origin; HTTPS is required in production |
-| `ADMIN_ORIGINS` | No | Exact comma-separated origins allowed to submit admin forms; defaults to the backend origin |
-| `PUBLIC_SITE_ORIGINS` | No | Exact comma-separated origins receiving public API CORS headers |
-| `LOOPS_API_KEY` | No | Required only when programs use a Loops template ID |
-| `LEADERBOARD_CACHE_TTL_MS` | No | Backend cache TTL, 1–300 seconds; default 30 seconds |
-| `ADMIN_TITLE` | No | Organiser dashboard heading |
-| `DEBUG_LOGS` | No | Secret-free diagnostics; leave `false` normally |
+| `NOCODB_URL` | Yes | NocoDB HTTP(S) origin |
+| `NOCODB_API_TOKEN` | Yes | Dedicated server-side API token |
+| `NOCODB_PROJECT_ID` | Yes | Base ID containing both tables |
+| `HEALTHCHECK_SECRET` | Yes | Independent random secret of at least 32 characters |
+| `PUBLIC_BACKEND_URL` | Yes | Canonical public origin; HTTPS is required in production |
+| `ADMIN_ORIGINS` | No | Comma-separated origins allowed to submit admin forms; defaults to the backend origin |
+| `PUBLIC_SITE_ORIGINS` | No | Comma-separated browser origins allowed to call the leaderboard API |
+| `LOOPS_API_KEY` | No | Required only when a program has a Loops transactional ID |
+| `LEADERBOARD_CACHE_TTL_MS` | No | Cache duration from 1–300 seconds; default `30000` |
+| `ADMIN_TITLE` | No | Private dashboard heading |
+| `DEBUG_LOGS` | No | Secret-free diagnostic events; normally `false` |
+| `PORT` | No | Listening port; default `3000` |
 
-Startup fails immediately on missing required values, weak health secrets, invalid ports/origins, or a non-HTTPS production backend URL.
+Generate secrets with a cryptographically secure password manager or secret generator. Startup fails when required variables are missing, a URL is invalid, the health secret is too short, or production is configured without HTTPS.
 
-## Local verification
+## Verify before deploying
+
+Node.js 22 is required when running outside Docker.
 
 ```sh
 npm test
 npm run check
+docker compose --env-file .env.example config --quiet
+docker build --tag beacons:local .
 ```
 
-To run against a real NocoDB base without TLS locally, set `NODE_ENV=development` and use a local `PUBLIC_BACKEND_URL`. Do not use production data in developer environments.
+The GitHub Actions workflow runs these checks on every push and pull request.
 
-## Deploy
+## Deploy with Docker Compose or Portainer
 
-The supplied Compose service:
+The included Compose service builds the application, runs it as the unprivileged `node` user, drops Linux capabilities, uses a read-only filesystem, rotates container logs, and binds the host port only on `127.0.0.1`.
 
-- binds only to `127.0.0.1` on the VPS;
-- runs as the unprivileged `node` user;
-- has a read-only filesystem, no Linux capabilities, and `no-new-privileges`;
-- uses process liveness—not an upstream dependency—as its container health check;
-- handles `SIGTERM`/`SIGINT` with a 10-second graceful shutdown window.
+For Docker Compose:
 
-Deploy one replica through Portainer or Docker Compose, then route the public hostname to `http://127.0.0.1:3000` through Cloudflare Tunnel or a reverse proxy. Configure Cloudflare as follows:
+```sh
+cp .env.example .env
+# Fill in .env with production values.
+docker compose config --quiet
+docker compose up --detach --build
+docker compose ps
+```
 
-1. Protect `/admin*` with a self-hosted Access application restricted to the organiser group.
-2. Ensure the VPS origin cannot be reached directly from the internet.
-3. Do not publicly route `/internal/*` or `/health/*` unless an explicit monitor needs them.
-4. Add request/body-size and rate-limit rules for `/api/webhooks/*`, `/api/public/*`, and `/admin/*` appropriate to event traffic.
-5. Preserve the client `Origin` and `Referer` headers used by admin CSRF checks.
+For Portainer, deploy the repository as a Git-backed stack and enter the `.env.example` keys in the stack environment editor. Do not paste secrets into the Compose file or repository. Keep the replica count at one, deploy a reviewed commit or release tag, and disable uncontrolled automatic updates.
 
-The container liveness check calls `/health/live`. Monitor database readiness separately:
+Route the hostname to `http://127.0.0.1:3000` through a host reverse proxy or an appropriately configured Cloudflare Tunnel. If the tunnel runs in another container, give it an explicit route to the host-bound service rather than publishing Beacons on all interfaces.
+
+Configure Cloudflare to:
+
+1. protect `/admin*` with an Access application restricted to organisers;
+2. prevent public traffic from bypassing the tunnel and reaching the VPS origin;
+3. preserve `Origin` and `Referer` headers for admin CSRF checks;
+4. rate-limit `/api/webhooks/*`, `/api/public/*`, and `/admin/*`; and
+5. restrict `/internal/*` to the monitoring path that needs it.
+
+After each deployment, confirm the container is healthy, run the authenticated database-readiness request below, and complete one non-production test signup before directing event traffic to the service. Review `docker compose logs --tail=100 beacons` without enabling debug logs.
+
+For an application rollback, redeploy the previous reviewed commit or release tag and repeat the health checks. Application rollback does not reverse database records; recover data only through the tested NocoDB/PostgreSQL backup procedure.
+
+## Health checks and operations
+
+Container liveness is available without authentication:
+
+```http
+GET /health/live
+```
+
+Database readiness requires the independent health secret:
 
 ```sh
 curl --fail --silent --show-error \
@@ -124,11 +168,48 @@ curl --fail --silent --show-error \
   https://YOUR-BACKEND/internal/health/db
 ```
 
-That readiness route verifies that both required tables can be resolved, have the expected columns, and can be read. Alert on a non-200 response and on structured log events named `request_failed`, `leaderboard_refresh_failed`, `loops_email_failed`, or `server_shutdown_failed`.
+Expected response:
+
+```json
+{"ok":true}
+```
+
+The readiness check confirms that both tables have the expected columns and can be read. It does not validate PostgreSQL indexes or constraints.
+
+Back up the NocoDB/PostgreSQL data regularly and test restoration. Alert on readiness failures and these structured log events:
+
+- `request_failed`
+- `leaderboard_refresh_failed`
+- `loops_email_failed`
+- `server_shutdown_failed`
+
+Loops delivery happens after the attendee is saved. A Loops failure does not cause Fillout to retry the signup, and there is no durable email outbox, so `loops_email_failed` needs an organiser recovery process.
+
+## Safe CSV imports
+
+The tracked importer accepts Fillout-style CSV exports without logging attendee names, emails, or referral codes. It performs a read-only preflight by default, validates every row before writing, detects duplicate emails and referral codes, and orders rows so an imported referrer exists before a referred attendee.
+
+Required CSV headers are `First Name (legal)`, `Last Name (legal)`, and `Email Address`. Optional headers are `Preferred Name`, `Referral Code`, and `Owned Referral Code`; unrelated export columns are ignored.
+
+Run the preflight from a secured workstation. The command loads `.env` when present, while already-exported environment variables take precedence:
+
+```sh
+npm run import:csv -- path/to/attendees.csv
+```
+
+If preflight passes, stop the Beacons container so the importer becomes the only database writer, then run:
+
+```sh
+npm run import:csv -- path/to/attendees.csv --commit
+```
+
+The write requires an exact interactive confirmation. It is sequential, does not send Loops emails, and stops on the first database failure. A retry is safe: attendees already written are skipped by normalized email. CSV files remain ignored by Git and should be deleted securely after the import and backup window.
+
+The importer is intentionally excluded from the production container. Run it from a secured operator workstation, and restart Beacons only after the import reports completion.
 
 ## Organiser workflow
 
-Visit the Access-protected dashboard at `/admin`, enter an event name and optionally a Loops Transactional ID, then save the generated webhook key immediately. It cannot be recovered. Rotation invalidates the old key without changing public URLs.
+Open `/admin` through Cloudflare Access. Create a program with an optional Loops Transactional ID and immediately save the generated webhook key; only its SHA-256 hash is stored, so the original key cannot be recovered. Rotating the key invalidates the previous key without changing the program URLs.
 
 Configure Fillout to send:
 
@@ -148,26 +229,39 @@ Content-Type: application/json
 }
 ```
 
-`preferredName` and `referralCodeUsed` may be empty. A referral code may contain only ASCII letters, numbers, `_`, and `-`. Email addresses use a deliberately conservative unquoted-address format so untrusted input cannot alter NocoDB filters.
+`firstName`, `lastName`, and `email` are required. `preferredName` and `referralCodeUsed` may be empty. Referral codes accept ASCII letters, numbers, `_`, and `-` and are normalized to uppercase.
 
-Webhook responses:
+Webhook outcomes:
 
-- `201` / `created`: attendee created;
-- `200` / `duplicate_ignored`: normalized email already exists in that program;
-- `400`: invalid JSON or fields;
-- `401`: unknown/inactive program or incorrect key;
-- `415`: incorrect content type;
-- `503`: temporary upstream failure; Fillout may retry.
+| Status | Meaning |
+| --- | --- |
+| `201` | Signup created |
+| `200` | Duplicate normalized email ignored within this program |
+| `400` | Invalid JSON or field value |
+| `401` | Unknown/inactive program or incorrect webhook key |
+| `415` | Incorrect content type |
+| `503` | Temporary NocoDB failure; the webhook may be retried |
 
-Loops delivery is asynchronous after the attendee is saved. A Loops outage does not reject or duplicate the signup; it emits `loops_email_failed`. There is currently no durable email outbox, so organisers must monitor that event and manually recover a missed email from the private dashboard.
+## Public leaderboard integration
 
-## Public leaderboard API
+Nova or another allowed browser origin can request:
 
 ```http
-GET /api/public/programs/:publicId/leaderboard
+GET https://YOUR-BACKEND/api/public/programs/:program-slug/leaderboard
 ```
 
-Example:
+No authorization header is required. Add the frontend origin to `PUBLIC_SITE_ORIGINS` so the browser receives the correct CORS header.
+
+```js
+const response = await fetch(
+  "https://YOUR-BACKEND/api/public/programs/bp_PROGRAM_IDENTIFIER/leaderboard",
+);
+
+if (!response.ok) throw new Error("Leaderboard unavailable");
+const leaderboard = await response.json();
+```
+
+Example response:
 
 ```json
 [
@@ -176,20 +270,39 @@ Example:
 ]
 ```
 
-Only attendees with at least one valid same-program referral appear. Responses are calculated from current attendee records, cached in the backend for up to `LEADERBOARD_CACHE_TTL_MS`, and force-refreshed after an accepted signup. Concurrent cache misses share one NocoDB read.
+Only attendees with at least one valid same-program referral appear. The response never includes email addresses, raw referral codes, program secrets, or database IDs. Results are cached for `LEADERBOARD_CACHE_TTL_MS` and refreshed after an accepted signup.
 
-## Launch checklist
+## Production checklist
 
-- [ ] Create both NocoDB tables, required/not-null rules, and all three unique constraints.
-- [ ] Use a dedicated least-privilege NocoDB token and store all secrets outside Git.
-- [ ] Run `npm test` and `npm run check` in CI.
-- [ ] Create two test programs and verify the same email can join each once, but not either twice.
-- [ ] Verify a referral code from one program is ignored in another.
-- [ ] Rotate a webhook key and verify the old key returns `401`.
-- [ ] Confirm public JSON contains only `displayName` and `referralCount`.
-- [ ] Confirm direct-origin access cannot bypass Cloudflare Access on `/admin*`.
-- [ ] Exercise NocoDB backup restoration.
-- [ ] Configure daily database readiness monitoring, error-log alerts, and Cloudflare rate limits.
-- [ ] Test Loops delivery and document the manual recovery procedure for `loops_email_failed`.
+Hard launch gates:
 
-Scratch import scripts are operator tools, are excluded from the production image, and can print personal data. Run them only from a secured workstation. CSV and scratch output files are ignored by Git.
+- [ ] The NocoDB schema matches the tables above, optional defaults are unset, and `active` defaults to `true`.
+- [ ] Beacons is the only writer and exactly one Node.js process/container is running.
+- [ ] Production secrets live outside Git and the NocoDB token is base-scoped.
+- [ ] Tests, syntax checks, Compose validation, and the image build pass in CI.
+- [ ] Cloudflare Access protects `/admin*` and the VPS origin cannot bypass it.
+- [ ] Fillout returns `201` for a new signup and `200` for a duplicate.
+- [ ] A referral code from one program is ignored in another.
+- [ ] The public response contains only `displayName` and `referralCount`.
+- [ ] Liveness and authenticated database-readiness monitoring are active.
+- [ ] NocoDB/PostgreSQL backups and a restore test are complete.
+- [ ] Loops delivery and the manual `loops_email_failed` recovery path have been tested.
+
+Recommended defence in depth for the single-writer deployment:
+
+- [ ] Mark application-required NocoDB fields **Not Null**.
+- [ ] Enable **Unique values only** for `programs.public_slug`.
+- [ ] Apply database checks and foreign keys when direct PostgreSQL administration is available.
+
+Required before scaling or introducing another writer:
+
+- [ ] Apply both composite unique indexes shown above.
+- [ ] Confirm the indexes and relational constraints through PostgreSQL metadata queries.
+
+## Security notes
+
+- Program URLs use random 144-bit identifiers; webhook keys use independent 256-bit secrets.
+- Only webhook-key hashes are stored.
+- Logs intentionally omit names, emails, program identifiers, credentials, upstream response bodies, and NocoDB filter paths.
+- Admin authentication is delegated to Cloudflare Access; do not expose `/admin` through an unprotected origin.
+- CSV exports, database dumps, diagnostic scratch scripts, and local handoff notes are intentionally ignored by Git. The reviewed importer is tracked separately under `tools/`.

@@ -1,9 +1,14 @@
 .git
-.env
+.env*
 node_modules
 test
 scratch
+tools
 public-site
+*.csv
+*.csv.*
+*.dump
+*.backup
 currentdb-DO_NOT-COMMIT.sql
 currentdb-DO_NOT_COMMIT.sql
 npm-debug.log*

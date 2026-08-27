@@ -1,6 +1,31 @@
+# Local and production secrets
 .env
+.env.*
+!.env.example
+
+# Dependencies, test output, and logs
 node_modules/
-.DS_Store
+coverage/
+*.log
 npm-debug.log*
-*.csv*
-scratch/*.txt
+
+# Local operating-system and Codex workspace files
+.DS_Store
+.agents/
+.codex/
+
+# Private data and database exports
+*.csv
+*.csv.*
+*.dump
+*.backup
+
+# Now this is fire
+currentdb-DO_NOT-COMMIT.sql
+
+/scratch/
+
+# Superseded local handoff notes; their production guidance lives in README.md
+/DATABASE_MANUAL_SETUP.md
+
+# The reviewed CSV importer is tracked under tools/; scratch remains local-only.
