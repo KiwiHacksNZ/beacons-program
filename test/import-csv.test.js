@@ -35,15 +35,33 @@ test("import preflight skips existing attendees and orders new referral dependen
   assert.deepEqual(result.ready.map((item) => item.signup.email), ["parent@example.com", "child@example.com"]);
 });
 
-test("import preflight reports row numbers without echoing private field values", () => {
+test("import preflight clears malformed and unresolved referral codes", () => {
   const rows = parseCsv([
     "First Name (legal),Last Name (legal),Email Address,Referral Code,Owned Referral Code",
     "Ali,Example,private@example.com,UNKNOWN,ALI-1",
+    "Mia,Example,mia@example.com,not a code,invalid owner code",
+  ].join("\n"));
+  const result = prepareImport(rows, [], "bp_one");
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.ready.length, 2);
+  assert.deepEqual(result.ready.map((item) => item.signup.referralCodeUsed), ["", ""]);
+  assert.equal(result.ignoredReferralCodes, 2);
+  assert.equal(result.regeneratedOwnedCodes, 1);
+  assert.equal(result.ready[0].ownedReferralCode, "ALI-1");
+  assert.match(result.ready[1].ownedReferralCode, /^MIA-[A-F0-9]{5}$/);
+});
+
+test("import preflight keeps duplicate emails as hard errors without echoing private values", () => {
+  const rows = parseCsv([
+    "First Name (legal),Last Name (legal),Email Address",
+    "Ali,Example,private@example.com",
+    "Ali,Example,PRIVATE@example.com",
   ].join("\n"));
   const result = prepareImport(rows, [], "bp_one");
   const report = JSON.stringify(result.errors);
 
   assert.equal(result.ready.length, 0);
-  assert.match(report, /Referral code does not exist/);
-  assert.doesNotMatch(report, /private@example|UNKNOWN|ALI-1/);
+  assert.match(report, /Duplicate normalized email/);
+  assert.doesNotMatch(report, /private@example/);
 });

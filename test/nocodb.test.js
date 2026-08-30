@@ -79,6 +79,46 @@ test("skips simultaneous case-variant emails within the same program", async () 
   }
 });
 
+test("regenerates an owned referral code when it already exists in the program", async () => {
+  const originalFetch = globalThis.fetch;
+  let inserted;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [{ title: "attendees", table_name: "attendees", id: "attendees-id" }] });
+    }
+    if (path === "/api/v2/tables/attendees-id/records" && options.method === "POST") {
+      inserted = JSON.parse(options.body);
+      return jsonResponse({ ...inserted, Id: 2 });
+    }
+    if (path === "/api/v2/tables/attendees-id/records") {
+      const where = parsed.searchParams.get("where") || "";
+      if (where.includes("email_normalized")) return jsonResponse({ list: [] });
+      if (where.includes("owned_referral_code,eq,SEB-AAAAA")) return jsonResponse({ list: [{ Id: 1 }] });
+      if (where.includes("owned_referral_code")) return jsonResponse({ list: [] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    const result = await client.acceptSignup(
+      { public_slug: "bp_program" },
+      { firstName: "Sebastian", lastName: "Example", preferredName: "", email: "seb@example.com", referralCodeUsed: "" },
+      "SEB-AAAAA",
+    );
+
+    assert.equal(result.accepted, true);
+    assert.match(result.owned_referral_code, /^SEB-[A-F0-9]{5}$/);
+    assert.notEqual(result.owned_referral_code, "SEB-AAAAA");
+    assert.equal(inserted.owned_referral_code, result.owned_referral_code);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("database failures do not expose filter values or upstream response bodies", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {

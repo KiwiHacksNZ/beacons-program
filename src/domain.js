@@ -101,14 +101,21 @@ export function hashSecret(secret) {
   return createHash("sha256").update(String(secret)).digest("hex");
 }
 
-export function generateRefCode(firstName) {
+export function generateRefCode(firstName, lastName = "", email = "") {
   const normalizedName = String(firstName || "")
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
-  const prefix = (normalizedName || "JOIN").slice(0, 4).padEnd(3, "X");
-  return `${prefix}-${randomBytes(6).toString("hex").toUpperCase()}`;
+  const prefix = (normalizedName || "JOIN").slice(0, 3).padEnd(3, "X");
+  const hashInput = [
+    String(firstName || "").trim().toLowerCase(),
+    String(lastName || "").trim().toLowerCase(),
+    String(email || "").trim().toLowerCase(),
+    randomBytes(16).toString("hex"),
+  ].join("\u0000");
+  const suffix = createHash("sha256").update(hashInput).digest("hex").slice(0, 5).toUpperCase();
+  return `${prefix}-${suffix}`;
 }
 
 export function bearerToken(headerValue) {

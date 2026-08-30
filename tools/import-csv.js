@@ -102,6 +102,8 @@ export function prepareImport(rows, existingAttendees, programSlug) {
   const reservedCodes = new Set();
   const inputEmails = new Set();
   let skippedExisting = 0;
+  let ignoredReferralCodes = 0;
+  let regeneratedOwnedCodes = 0;
 
   for (const attendee of existingAttendees) {
     if (attendee.program_slug !== programSlug) continue;
@@ -112,12 +114,18 @@ export function prepareImport(rows, existingAttendees, programSlug) {
   }
 
   for (const row of rows) {
+    const suppliedReferralCode = normalizeOptionalCell(row.values["Referral Code"]);
+    const referralCodeUsed = suppliedReferralCode && isValidReferralCode(suppliedReferralCode)
+      ? suppliedReferralCode
+      : "";
+    if (suppliedReferralCode && !referralCodeUsed) ignoredReferralCodes++;
+
     const rawSignup = {
       firstName: row.values["First Name (legal)"],
       lastName: row.values["Last Name (legal)"],
       preferredName: normalizeOptionalCell(row.values["Preferred Name"]),
       email: row.values["Email Address"],
-      referralCodeUsed: normalizeOptionalCell(row.values["Referral Code"]),
+      referralCodeUsed,
     };
     const validated = validateSignup(rawSignup);
     if (!validated.ok) {
@@ -137,10 +145,10 @@ export function prepareImport(rows, existingAttendees, programSlug) {
       continue;
     }
 
-    const suppliedCode = normalizeOptionalCell(row.values["Owned Referral Code"]).toUpperCase();
+    let suppliedCode = normalizeOptionalCell(row.values["Owned Referral Code"]).toUpperCase();
     if (suppliedCode && !isValidReferralCode(suppliedCode)) {
-      errors.push({ line: row.line, message: "Invalid owned referral code." });
-      continue;
+      suppliedCode = "";
+      regeneratedOwnedCodes++;
     }
     if (suppliedCode && reservedCodes.has(suppliedCode)) {
       errors.push({ line: row.line, message: "Owned referral code is already in use." });
@@ -149,7 +157,7 @@ export function prepareImport(rows, existingAttendees, programSlug) {
 
     let ownedReferralCode = suppliedCode;
     for (let attempt = 0; !ownedReferralCode && attempt < 100; attempt++) {
-      const candidate = generateRefCode(signup.preferredName || signup.firstName);
+      const candidate = generateRefCode(signup.firstName, signup.lastName, signup.email);
       if (!reservedCodes.has(candidate)) ownedReferralCode = candidate;
     }
     if (!ownedReferralCode) {
@@ -163,12 +171,14 @@ export function prepareImport(rows, existingAttendees, programSlug) {
 
   for (const candidate of candidates) {
     if (candidate.signup.referralCodeUsed && !reservedCodes.has(candidate.signup.referralCodeUsed)) {
-      errors.push({ line: candidate.line, message: "Referral code does not exist in the selected program or CSV." });
+      candidate.signup.referralCodeUsed = "";
+      ignoredReferralCodes++;
     }
   }
 
-  if (errors.length) return { errors, ready: [], skippedExisting };
-  return { errors: [], ready: orderByReferralDependency(candidates), skippedExisting };
+  const summary = { skippedExisting, ignoredReferralCodes, regeneratedOwnedCodes };
+  if (errors.length) return { errors, ready: [], ...summary };
+  return { errors: [], ready: orderByReferralDependency(candidates), ...summary };
 }
 
 function orderByReferralDependency(candidates) {
@@ -256,6 +266,8 @@ async function main() {
       console.error(`\nPreflight failed with ${prepared.errors.length} invalid row(s). No records were written.`);
       for (const error of prepared.errors.slice(0, 20)) console.error(`- CSV line ${error.line}: ${error.message}`);
       if (prepared.errors.length > 20) console.error(`- ${prepared.errors.length - 20} additional error(s) omitted.`);
+      console.error(`Referral codes that would be ignored: ${prepared.ignoredReferralCodes}`);
+      console.error(`Owned referral codes that would be regenerated: ${prepared.regeneratedOwnedCodes}`);
       process.exitCode = 1;
       return;
     }
@@ -264,6 +276,8 @@ async function main() {
     console.log(`CSV data rows: ${rows.length}`);
     console.log(`Already present: ${prepared.skippedExisting}`);
     console.log(`Ready to import: ${prepared.ready.length}`);
+    console.log(`Ignored referral codes: ${prepared.ignoredReferralCodes}`);
+    console.log(`Regenerated owned referral codes: ${prepared.regeneratedOwnedCodes}`);
 
     if (!commit) {
       console.log("\nDry run only; no records were written. Re-run with --commit to enable writes.");

@@ -73,10 +73,10 @@ test("creates separate unguessable program and webhook credentials", () => {
 });
 
 test("creates sanitized referral codes with independent random suffixes", () => {
-  const first = generateRefCode("Émi<script>");
-  const second = generateRefCode("Émi<script>");
-  assert.match(first, /^EMIS-[A-F0-9]{12}$/);
-  assert.match(second, /^EMIS-[A-F0-9]{12}$/);
+  const first = generateRefCode("Émi<script>", "Example", "emi@example.com");
+  const second = generateRefCode("Émi<script>", "Example", "emi@example.com");
+  assert.match(first, /^EMI-[A-F0-9]{5}$/);
+  assert.match(second, /^EMI-[A-F0-9]{5}$/);
   assert.notEqual(first, second);
   assert.equal(isValidReferralCode(first), true);
   assert.equal(isValidReferralCode("BAD)~OR(X"), false);

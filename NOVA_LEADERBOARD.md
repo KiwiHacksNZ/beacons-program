@@ -61,7 +61,7 @@ Map your Fillout form fields to construct this exact JSON body:
   "lastName": "Example",
   "preferredName": "Ali",
   "email": "alice@example.com",
-  "referralCodeUsed": "KIWI-A1B2C3D4E5F6"
+  "referralCodeUsed": "KIW-A1B2C"
 }
 ```
 

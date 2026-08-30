@@ -1,4 +1,4 @@
-import { toPublicLeaderboard } from "./domain.js";
+import { generateRefCode, toPublicLeaderboard } from "./domain.js";
 
 const REQUIRED_COLUMNS = {
   programs: ["Id", "name", "public_slug", "webhook_secret_hash", "loops_transactional_id", "active"],
@@ -30,7 +30,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
   }
 
   let tableIdMap = null;
-  const signupLocks = new Map();
+  const programSignupLocks = new Map();
 
   async function resolveTableId(tableName) {
     if (!projectId) throw new Error("NOCODB_PROJECT_ID is required to resolve tables");
@@ -79,11 +79,13 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
   return {
     async acceptSignup(program, signup, generatedRefCode) {
       const normalizedEmail = String(signup.email || "").trim().toLowerCase();
-      const lockKey = `${program.public_slug}\n${normalizedEmail}`;
-      const previous = signupLocks.get(lockKey) || Promise.resolve();
+      // Keep code allocation plus insertion atomic relative to every other
+      // signup for this program in the supported single-process deployment.
+      const lockKey = program.public_slug;
+      const previous = programSignupLocks.get(lockKey) || Promise.resolve();
       let release;
       const current = new Promise((resolve) => { release = resolve; });
-      signupLocks.set(lockKey, current);
+      programSignupLocks.set(lockKey, current);
 
       await previous.catch(() => {});
 
@@ -91,7 +93,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
         return await acceptSignupOnce(program, signup, generatedRefCode, normalizedEmail);
       } finally {
         release();
-        if (signupLocks.get(lockKey) === current) signupLocks.delete(lockKey);
+        if (programSignupLocks.get(lockKey) === current) programSignupLocks.delete(lockKey);
       }
     },
 
@@ -220,6 +222,15 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       }
     }
 
+    let ownedReferralCode = generatedRefCode;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const ownedCodeQuery = encodeURIComponent(`(owned_referral_code,eq,${ownedReferralCode})~and(program_slug,eq,${program.public_slug})`);
+      const owner = await request(`/api/v2/tables/${attendeesTableId}/records?where=${ownedCodeQuery}&limit=1`);
+      if (!owner.list || owner.list.length === 0) break;
+      ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail);
+      if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
+    }
+
     const payload = {
       program_slug: program.public_slug,
       first_name: signup.firstName,
@@ -227,7 +238,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       preferred_name: signup.preferredName || null,
       email: normalizedEmail,
       email_normalized: normalizedEmail,
-      owned_referral_code: generatedRefCode,
+      owned_referral_code: ownedReferralCode,
       referral_code_used: validReferralCode
     };
 
@@ -240,7 +251,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       authorized: true,
       accepted: true,
       attendee_id: res.Id || res.id,
-      owned_referral_code: generatedRefCode,
+      owned_referral_code: ownedReferralCode,
       referral_applied: referrerId !== null,
       loops_transactional_id: program.loops_transactional_id
     };

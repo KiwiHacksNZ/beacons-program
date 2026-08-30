@@ -77,7 +77,7 @@ Keep these constraints in place:
 - protect `/admin*` at the edge and prevent direct access to the origin; and
 - store secrets outside Git and use a base-scoped NocoDB token.
 
-Within one process, signups for the same normalized email and program are serialized before the NocoDB insert. The service also validates names, email addresses, referral formats, program scope, and webhook credentials.
+Within one process, signups are serialized per program before referral-code allocation and the NocoDB insert. The service also validates names, email addresses, referral formats, program scope, and webhook credentials.
 
 Known limitations accepted by this deployment profile:
 
@@ -296,7 +296,7 @@ Logs go to standard output as structured JSON and are rotated by Compose. Ship t
 
 ## Safe CSV imports
 
-The tracked importer accepts Fillout-style CSV exports without logging attendee names, emails, or referral codes. It performs a read-only preflight by default, validates every row before writing, detects duplicate emails and referral codes, and orders rows so an imported referrer exists before a referred attendee.
+The tracked importer accepts Fillout-style CSV exports without logging attendee names, emails, or referral codes. It performs a read-only preflight by default, validates every row before writing, detects duplicate emails and owned referral codes, and orders rows so an imported referrer exists before a referred attendee. Malformed or unresolved used referral codes are imported as blank. A malformed owned referral code is replaced with a newly generated valid code; the preflight summary reports both kinds of cleanup.
 
 Required CSV headers are `First Name (legal)`, `Last Name (legal)`, and `Email Address`. Optional headers are `Preferred Name`, `Referral Code`, and `Owned Referral Code`; unrelated export columns are ignored.
 
@@ -334,11 +334,13 @@ Content-Type: application/json
   "lastName": "Example",
   "preferredName": "Ali",
   "email": "alice@example.com",
-  "referralCodeUsed": "MIA-80A1C7DD2F10"
+  "referralCodeUsed": "MIA-80A1C"
 }
 ```
 
 `firstName`, `lastName`, and `email` are required. `preferredName` and `referralCodeUsed` may be empty. Referral codes accept ASCII letters, numbers, `_`, and `-` and are normalized to uppercase.
+
+New owned referral codes use three normalized characters from the legal first name followed by a five-character hash fragment, for example `SEB-9DDE1`. Code allocation is serialized per program and regenerates the hash fragment when an existing code is found.
 
 Webhook outcomes:
 
