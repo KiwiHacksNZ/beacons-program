@@ -34,6 +34,21 @@ test("adds an additional referral code and counts a referral made with it toward
   assert.deepEqual(await db.getLeaderboard(program), [{ displayName: "Ali", referralCount: 1 }]);
 });
 
+test("removes an additional referral code so it stops working for future referrals", async () => {
+  const db = createMemoryDbClient();
+  const program = await db.createProgram({ name: "Nova", publicSlug: "bp_nova", webhookSecretHash: "hash", loopsTransactionalId: null });
+  await db.acceptSignup(program, { firstName: "Ali", lastName: "Example", preferredName: "", email: "ali@example.com", referralCodeUsed: "" }, "ALI-ONE");
+
+  const attendee = (await db.getAdminAttendees())[0];
+  await db.addReferralCode(attendee, "FRIEND-CODE");
+  await db.removeReferralCode(attendee, "friend-code");
+
+  await assert.rejects(db.removeReferralCode(attendee, "FRIEND-CODE"), /isn't assigned to this attendee/);
+
+  await db.acceptSignup(program, { firstName: "Bea", lastName: "Example", preferredName: "", email: "bea@example.com", referralCodeUsed: "friend-code" }, "BEA-ONE");
+  assert.deepEqual(await db.getLeaderboard(program), []);
+});
+
 test("rejects a custom code already used elsewhere in the program and rotates a program secret", async () => {
   const db = createMemoryDbClient();
   const program = await db.createProgram({ name: "Nova", publicSlug: "bp_nova", webhookSecretHash: "hash", loopsTransactionalId: null });

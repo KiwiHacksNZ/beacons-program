@@ -68,6 +68,28 @@ test("renders additional codes and an add-code form scoped to the attendee", () 
   assert.match(html, /<code>FRIEND-CODE<\/code>/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /action="\/admin\/attendees\/7\/referral-codes"/);
+  assert.match(html, /action="\/admin\/attendees\/7\/referral-codes\/remove"/);
+  assert.match(html, /<input type="hidden" name="code" value="FRIEND-CODE">/);
+});
+
+test("searches attendees by name or email across programs", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [{ Id: 1, name: "Nova", public_slug: "bp_nova", active: true }],
+    attendees: [
+      { Id: 1, program_slug: "bp_nova", first_name: "Zed", last_name: "Example", preferred_name: "", email: "zed@example.com" },
+      { Id: 2, program_slug: "bp_nova", first_name: "Amy", last_name: "Example", preferred_name: "Bash", email: "amy@example.com" },
+      { Id: 3, program_slug: "bp_nova", first_name: "Ana", last_name: "Example", preferred_name: "", email: "ana@somewhereelse.com" },
+    ],
+    leaderboardsByProgram: new Map([["bp_nova", []]]),
+    search: "bash",
+  });
+
+  assert.match(html, />Amy</);
+  assert.doesNotMatch(html, />Zed</);
+  assert.doesNotMatch(html, />Ana</);
+  assert.match(html, /value="bash"/);
 });
 
 test("filters and sorts attendees by the requested program and field", () => {

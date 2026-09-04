@@ -84,6 +84,14 @@ test("creates sanitized referral codes with independent random suffixes", () => 
   assert.equal(isValidReferralCode("BAD)~OR(X"), false);
 });
 
+test("prefers the preferred name over the legal first name for the code prefix", () => {
+  const withPreferred = generateRefCode("Sebastian", "Example", "seb@example.com", "Bash<script>");
+  assert.match(withPreferred, /^BAS-[A-F0-9]{5}$/);
+
+  const withoutPreferred = generateRefCode("Sebastian", "Example", "seb@example.com", "");
+  assert.match(withoutPreferred, /^SEB-[A-F0-9]{5}$/);
+});
+
 test("validates program names and admin request origins", () => {
   assert.deepEqual(validateProgramName("  Nova 2027 "), { ok: true, value: "Nova 2027" });
   assert.equal(validateProgramName(" ").ok, false);

@@ -46,7 +46,7 @@ export function createMemoryDbClient() {
       let ownedReferralCode = generatedRefCode;
       for (let attempt = 0; attempt < 100; attempt++) {
         if (!isCodeTaken(program.public_slug, ownedReferralCode)) break;
-        ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail);
+        ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail, signup.preferredName);
         if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
       }
 
@@ -95,16 +95,28 @@ export function createMemoryDbClient() {
         }
         code = customCode;
       } else {
-        code = generateRefCode(current.first_name, current.last_name, current.email);
+        code = generateRefCode(current.first_name, current.last_name, current.email, current.preferred_name);
         for (let attempt = 0; attempt < 100; attempt++) {
           if (!isCodeTaken(current.program_slug, code)) break;
-          code = generateRefCode(current.first_name, current.last_name, current.email);
+          code = generateRefCode(current.first_name, current.last_name, current.email, current.preferred_name);
           if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
         }
       }
 
       current.additional_referral_codes = formatReferralCodeList([...existingAdditional, code]);
       return code;
+    },
+
+    async removeReferralCode(attendee, code) {
+      const current = attendees.find((candidate) => candidate.Id === attendee.Id);
+      if (!current) throw new Error("Attendee not found.");
+      const normalizedCode = String(code || "").trim().toUpperCase();
+      const existing = parseReferralCodeList(current.additional_referral_codes);
+      const updatedList = existing.filter((existingCode) => existingCode !== normalizedCode);
+      if (updatedList.length === existing.length) {
+        throw new AdminValidationError("That code isn't assigned to this attendee.");
+      }
+      current.additional_referral_codes = formatReferralCodeList(updatedList);
     },
 
     async getProgramBySlug(programSlug) {

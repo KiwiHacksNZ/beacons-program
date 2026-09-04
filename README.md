@@ -360,7 +360,7 @@ Content-Type: application/json
 
 `firstName`, `lastName`, and `email` are required. `preferredName` and `referralCodeUsed` may be empty. Referral codes accept ASCII letters, numbers, `_`, and `-` and are normalized to uppercase. The webhook always auto-generates the signup's own code; to assign a custom one, use the admin dashboard or NocoDB directly after the signup lands (see **Organiser workflow** and the `additional_referral_codes` notes above).
 
-New owned referral codes use three normalized characters from the legal first name followed by a five-character hash fragment, for example `SEB-9DDE1`. Code allocation is serialized per program and regenerates the hash fragment when an existing code is found.
+New owned referral codes use three normalized characters followed by a five-character hash fragment, for example `SEB-9DDE1`. The three-letter prefix comes from the preferred name when one is given, falling back to the legal first name otherwise — matching how the leaderboard already displays preferred name over legal name. Code allocation is serialized per program and regenerates the hash fragment when an existing code is found.
 
 Webhook outcomes:
 

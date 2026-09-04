@@ -187,6 +187,12 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       return withProgramLock(attendee.program_slug, () => addReferralCodeOnce(attendee, customCode));
     },
 
+    // Removes one additional code from an attendee. Does not touch
+    // owned_referral_code - that one is never removable.
+    async removeReferralCode(attendee, code) {
+      return withProgramLock(attendee.program_slug, () => removeReferralCodeOnce(attendee, code));
+    },
+
     async getProgramBySlug(programSlug) {
       const programsTableId = await resolveTableId("programs");
       const slugQuery = encodeURIComponent(`(public_slug,eq,${programSlug})~and(active,eq,true)`);
@@ -329,7 +335,7 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
     let ownedReferralCode = generatedRefCode;
     for (let attempt = 0; attempt < 100; attempt++) {
       if (!(await isCodeTaken(attendeesTableId, program.public_slug, ownedReferralCode))) break;
-      ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail);
+      ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail, signup.preferredName);
       if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
     }
 
@@ -379,10 +385,10 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       }
       code = customCode;
     } else {
-      code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email);
+      code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email, attendee.preferred_name);
       for (let attempt = 0; attempt < 100; attempt++) {
         if (!(await isCodeTaken(attendeesTableId, programSlug, code))) break;
-        code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email);
+        code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email, attendee.preferred_name);
         if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
       }
     }
@@ -394,6 +400,22 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
     });
 
     return code;
+  }
+
+  async function removeReferralCodeOnce(attendee, code) {
+    const attendeesTableId = await resolveTableId("attendees");
+    const attendeeId = attendee.Id ?? attendee.id;
+    const normalizedCode = String(code || "").trim().toUpperCase();
+    const existing = parseReferralCodeList(attendee.additional_referral_codes);
+    const updatedList = existing.filter((existingCode) => existingCode !== normalizedCode);
+    if (updatedList.length === existing.length) {
+      throw new AdminValidationError("That code isn't assigned to this attendee.");
+    }
+
+    await request(`/api/v2/tables/${attendeesTableId}/records`, {
+      method: "PATCH",
+      body: JSON.stringify({ Id: attendeeId, additional_referral_codes: formatReferralCodeList(updatedList) }),
+    });
   }
 }
 

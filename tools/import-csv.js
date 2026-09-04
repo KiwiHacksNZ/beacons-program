@@ -157,7 +157,7 @@ export function prepareImport(rows, existingAttendees, programSlug) {
 
     let ownedReferralCode = suppliedCode;
     for (let attempt = 0; !ownedReferralCode && attempt < 100; attempt++) {
-      const candidate = generateRefCode(signup.firstName, signup.lastName, signup.email);
+      const candidate = generateRefCode(signup.firstName, signup.lastName, signup.email, signup.preferredName);
       if (!reservedCodes.has(candidate)) ownedReferralCode = candidate;
     }
     if (!ownedReferralCode) {

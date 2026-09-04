@@ -61,17 +61,20 @@ const server = createServer(async (request, response) => {
   const webhookMatch = url.pathname.match(/^\/api\/webhooks\/fillout\/([^/]+)$/);
   const rotateMatch = url.pathname.match(/^\/admin\/programs\/([^/]+)\/rotate-key$/i);
   const addCodeMatch = url.pathname.match(/^\/admin\/attendees\/([^/]+)\/referral-codes$/i);
+  const removeCodeMatch = url.pathname.match(/^\/admin\/attendees\/([^/]+)\/referral-codes\/remove$/i);
   const routeName = publicMatch
     ? "/api/public/programs/:program/leaderboard"
     : webhookMatch
       ? "/api/webhooks/fillout/:program"
       : rotateMatch
         ? "/admin/programs/:program/rotate-key"
-        : addCodeMatch
-          ? "/admin/attendees/:attendee/referral-codes"
-          : ["/admin", "/admin/", "/admin/programs", "/admin/styles.css", "/internal/health/db", "/health/live"].includes(url.pathname)
-            ? url.pathname
-            : "unmatched";
+        : removeCodeMatch
+          ? "/admin/attendees/:attendee/referral-codes/remove"
+          : addCodeMatch
+            ? "/admin/attendees/:attendee/referral-codes"
+            : ["/admin", "/admin/", "/admin/programs", "/admin/styles.css", "/internal/health/db", "/health/live"].includes(url.pathname)
+              ? url.pathname
+              : "unmatched";
 
   debug("request_start", { method: request.method, route: routeName, origin: request.headers.origin || null, host: request.headers.host || null });
 
@@ -113,7 +116,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
       }
-      const generatedRefCode = generateRefCode(validated.value.firstName, validated.value.lastName, validated.value.email);
+      const generatedRefCode = generateRefCode(validated.value.firstName, validated.value.lastName, validated.value.email, validated.value.preferredName);
       const result = await db.acceptSignup(program, validated.value, generatedRefCode);
       debug("webhook_database_result", { authorized: Boolean(result?.authorized), accepted: Boolean(result?.accepted), referralApplied: Boolean(result?.referral_applied) });
       if (!result?.authorized) { sendJson(response, 401, { error: "Unauthorized" }); return; }
@@ -163,6 +166,7 @@ const server = createServer(async (request, response) => {
         sort: url.searchParams.get("sort"),
         dir: url.searchParams.get("dir"),
         programFilter: url.searchParams.get("program"),
+        search: url.searchParams.get("q"),
       }));
       return;
     }
@@ -224,6 +228,23 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && removeCodeMatch) {
+      debug("admin_remove_code_origin_check", { receivedOrigin: request.headers.origin || null, referer: request.headers.referer || null, fetchSite: request.headers["sec-fetch-site"] || null, allowed: isAllowedAdminRequest(request), allowedAdminOrigins: [...allowedAdminOrigins] });
+      if (!isAllowedAdminRequest(request)) {
+        sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
+        return;
+      }
+      if (!isValidRecordId(removeCodeMatch[1])) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "No referral code was removed.", status: 404 })); return; }
+      if (!hasContentType(request, "application/x-www-form-urlencoded")) { sendAdminHtml(response, 415, renderAdminError({ title: "Code not removed", message: "Unsupported form content type.", status: 415 })); return; }
+      const form = await readFormBody(request, 1024);
+      const rawCode = String(form.get("code") || "").trim();
+      const attendee = await db.getAttendeeById(removeCodeMatch[1]);
+      if (!attendee) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "That signup no longer exists.", status: 404 })); return; }
+      await db.removeReferralCode(attendee, rawCode);
+      response.writeHead(303, { location: "/admin" }).end();
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/internal/health/db") {
       debug("health_request", { authorized: isBearerAuthorized(request.headers.authorization, config.healthcheckSecret) });
       if (!isBearerAuthorized(request.headers.authorization, config.healthcheckSecret)) { sendJson(response, 401, { ok: false }); return; }
@@ -240,7 +261,7 @@ const server = createServer(async (request, response) => {
     // AdminValidationError (409) messages are static strings we author ourselves
     // (e.g. "code already in use"), so they are safe to show, unlike raw DB errors.
     const revealMessage = status === 413 || error instanceof AdminValidationError;
-    if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: revealMessage ? "Code not added" : "Service unavailable", message: revealMessage ? error.message : "The database request did not complete. Please try again.", status }));
+    if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: revealMessage ? "Referral code not saved" : "Service unavailable", message: revealMessage ? error.message : "The database request did not complete. Please try again.", status }));
     else sendJson(response, status, { error: status === 413 || status === 400 ? error.message : "Service temporarily unavailable" });
   }
 });

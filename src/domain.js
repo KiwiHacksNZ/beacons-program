@@ -122,8 +122,8 @@ export function hashSecret(secret) {
   return createHash("sha256").update(String(secret)).digest("hex");
 }
 
-export function generateRefCode(firstName, lastName = "", email = "") {
-  const normalizedName = String(firstName || "")
+export function generateRefCode(firstName, lastName = "", email = "", preferredName = "") {
+  const normalizedName = String(preferredName || firstName || "")
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toUpperCase()

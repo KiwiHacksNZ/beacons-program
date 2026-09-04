@@ -130,6 +130,47 @@ test("regenerates an owned referral code when it already exists in the program",
   }
 });
 
+test("regenerated owned code prefix follows the preferred name, not the legal first name", async () => {
+  const originalFetch = globalThis.fetch;
+  let inserted;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    const path = parsed.pathname;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [{ title: "attendees", table_name: "attendees", id: "attendees-id" }] });
+    }
+    if (path === "/api/v2/meta/tables/attendees-id") {
+      return jsonResponse({ columns: [{ title: "Id" }, { title: "owned_referral_code" }] });
+    }
+    if (path === "/api/v2/tables/attendees-id/records" && options.method === "POST") {
+      inserted = JSON.parse(options.body);
+      return jsonResponse({ ...inserted, Id: 2 });
+    }
+    if (path === "/api/v2/tables/attendees-id/records") {
+      const where = parsed.searchParams.get("where") || "";
+      if (where.includes("email_normalized")) return jsonResponse({ list: [] });
+      if (where.includes("owned_referral_code,eq,SEB-AAAAA")) return jsonResponse({ list: [{ Id: 1 }] });
+      if (where.includes("owned_referral_code")) return jsonResponse({ list: [] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    const result = await client.acceptSignup(
+      { public_slug: "bp_program" },
+      { firstName: "Sebastian", lastName: "Example", preferredName: "Bash", email: "seb@example.com", referralCodeUsed: "" },
+      "SEB-AAAAA",
+    );
+
+    assert.match(result.owned_referral_code, /^BAS-[A-F0-9]{5}$/);
+    assert.equal(inserted.owned_referral_code, result.owned_referral_code);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("counts a referral made with an additional code toward the owning attendee's single total", async () => {
   const originalFetch = globalThis.fetch;
   const attendees = [
@@ -351,6 +392,53 @@ test("rejects a custom referral code that's already used in the program", async 
     const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
     const attendee = { Id: 5, program_slug: "bp_program", first_name: "Ali", last_name: "Example", email: "ali@example.com", owned_referral_code: "ALI-ONE", additional_referral_codes: "" };
     await assert.rejects(client.addReferralCode(attendee, "TAKEN"), /already used in this program/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("removes an additional referral code from an attendee", async () => {
+  const originalFetch = globalThis.fetch;
+  let patched;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [{ title: "attendees", table_name: "attendees", id: "attendees-id" }] });
+    }
+    if (path === "/api/v2/tables/attendees-id/records" && options.method === "PATCH") {
+      patched = JSON.parse(options.body);
+      return jsonResponse(patched);
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    const attendee = { Id: 5, program_slug: "bp_program", owned_referral_code: "ALI-ONE", additional_referral_codes: "FRIEND-CODE,VIP-1" };
+    await client.removeReferralCode(attendee, "friend-code");
+
+    assert.equal(patched.Id, 5);
+    assert.equal(patched.additional_referral_codes, "VIP-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects removing a code that isn't assigned to the attendee", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/v2/meta/bases/base-id/tables") {
+      return jsonResponse({ list: [{ title: "attendees", table_name: "attendees", id: "attendees-id" }] });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+
+  try {
+    const client = createNocoDBClient({ url: "https://database.example", apiToken: "server-key", projectId: "base-id" });
+    const attendee = { Id: 5, program_slug: "bp_program", owned_referral_code: "ALI-ONE", additional_referral_codes: "VIP-1" };
+    await assert.rejects(client.removeReferralCode(attendee, "NOT-THERE"), /isn't assigned to this attendee/);
   } finally {
     globalThis.fetch = originalFetch;
   }
