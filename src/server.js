@@ -3,14 +3,17 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { renderAdmin, renderAdminError, renderProgramSecret } from "./admin.js";
 import { readConfig } from "./config.js";
-import { bearerToken, createProgramCredentials, generateRefCode, hashSecret, isBearerAuthorized, isValidPublicSlug, isValidRecordId, parseAllowedOrigins, securelyMatches, validateLoopsTransactionalId, validateProgramName, validateSignup } from "./domain.js";
+import { AdminValidationError, bearerToken, createProgramCredentials, generateRefCode, hashSecret, isBearerAuthorized, isValidPublicSlug, isValidRecordId, isValidReferralCode, parseAllowedOrigins, securelyMatches, validateLoopsTransactionalId, validateProgramName, validateSignup } from "./domain.js";
 import { createLeaderboardCache } from "./leaderboard-cache.js";
+import { createMemoryDbClient } from "./memory-db.js";
 import { createNocoDBClient } from "./nocodb.js";
 
 const config = readConfig();
 const allowedOrigins = parseAllowedOrigins(config.publicSiteOrigins);
 const allowedAdminOrigins = parseAllowedOrigins(config.adminOrigins);
-const db = createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
+const db = config.useMemoryDb
+  ? createMemoryDbClient()
+  : createNocoDBClient({ url: config.nocodbUrl, apiToken: config.nocodbApiToken, projectId: config.nocodbProjectId });
 const adminCss = await readFile(fileURLToPath(new URL("./admin.css", import.meta.url)), "utf8");
 const leaderboardCache = createLeaderboardCache({ loadLeaderboard: (program) => db.getLeaderboard(program) });
 const backgroundTasks = new Set();
@@ -57,15 +60,18 @@ const server = createServer(async (request, response) => {
   const publicMatch = url.pathname.match(/^\/api\/public\/programs\/([^/]+)\/leaderboard$/);
   const webhookMatch = url.pathname.match(/^\/api\/webhooks\/fillout\/([^/]+)$/);
   const rotateMatch = url.pathname.match(/^\/admin\/programs\/([^/]+)\/rotate-key$/i);
+  const addCodeMatch = url.pathname.match(/^\/admin\/attendees\/([^/]+)\/referral-codes$/i);
   const routeName = publicMatch
     ? "/api/public/programs/:program/leaderboard"
     : webhookMatch
       ? "/api/webhooks/fillout/:program"
       : rotateMatch
         ? "/admin/programs/:program/rotate-key"
-        : ["/admin", "/admin/", "/admin/programs", "/admin/styles.css", "/internal/health/db", "/health/live"].includes(url.pathname)
-          ? url.pathname
-          : "unmatched";
+        : addCodeMatch
+          ? "/admin/attendees/:attendee/referral-codes"
+          : ["/admin", "/admin/", "/admin/programs", "/admin/styles.css", "/internal/health/db", "/health/live"].includes(url.pathname)
+            ? url.pathname
+            : "unmatched";
 
   debug("request_start", { method: request.method, route: routeName, origin: request.headers.origin || null, host: request.headers.host || null });
 
@@ -148,7 +154,16 @@ const server = createServer(async (request, response) => {
       debug("admin_page", { method: request.method });
       const [attendees, programs] = await Promise.all([db.getAdminAttendees(), db.getAdminPrograms()]);
       const entries = await Promise.all(programs.map(async (program) => [program.public_slug, (await db.getLeaderboard(program)) || []]));
-      sendAdminHtml(response, 200, renderAdmin({ title: config.adminTitle, backendUrl: config.publicBackendUrl, programs, attendees, leaderboardsByProgram: new Map(entries) }));
+      sendAdminHtml(response, 200, renderAdmin({
+        title: config.adminTitle,
+        backendUrl: config.publicBackendUrl,
+        programs,
+        attendees,
+        leaderboardsByProgram: new Map(entries),
+        sort: url.searchParams.get("sort"),
+        dir: url.searchParams.get("dir"),
+        programFilter: url.searchParams.get("program"),
+      }));
       return;
     }
 
@@ -188,6 +203,27 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && addCodeMatch) {
+      debug("admin_add_code_origin_check", { receivedOrigin: request.headers.origin || null, referer: request.headers.referer || null, fetchSite: request.headers["sec-fetch-site"] || null, allowed: isAllowedAdminRequest(request), allowedAdminOrigins: [...allowedAdminOrigins] });
+      if (!isAllowedAdminRequest(request)) {
+        sendAdminHtml(response, 403, renderAdminError({ title: "Request blocked", message: "The request origin did not match the admin site.", status: 403 }));
+        return;
+      }
+      if (!isValidRecordId(addCodeMatch[1])) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "No referral code was added.", status: 404 })); return; }
+      if (!hasContentType(request, "application/x-www-form-urlencoded")) { sendAdminHtml(response, 415, renderAdminError({ title: "Code not added", message: "Unsupported form content type.", status: 415 })); return; }
+      const form = await readFormBody(request, 1024);
+      const rawCode = String(form.get("code") || "").trim();
+      if (rawCode && !isValidReferralCode(rawCode)) {
+        sendAdminHtml(response, 400, renderAdminError({ title: "Code not added", message: "Custom codes must start with a letter or number and use only letters, numbers, hyphens, and underscores (max 64 characters)." }));
+        return;
+      }
+      const attendee = await db.getAttendeeById(addCodeMatch[1]);
+      if (!attendee) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "That signup no longer exists.", status: 404 })); return; }
+      await db.addReferralCode(attendee, rawCode ? rawCode.toUpperCase() : null);
+      response.writeHead(303, { location: "/admin" }).end();
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/internal/health/db") {
       debug("health_request", { authorized: isBearerAuthorized(request.headers.authorization, config.healthcheckSecret) });
       if (!isBearerAuthorized(request.headers.authorization, config.healthcheckSecret)) { sendJson(response, 401, { ok: false }); return; }
@@ -201,13 +237,17 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     log("error", "request_failed", { route: routeName, message: error.message, method: request.method, origin: request.headers.origin || null });
     const status = error.statusCode || 503;
-    if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: "Service unavailable", message: status === 413 ? error.message : "The database request did not complete. Please try again.", status }));
+    // AdminValidationError (409) messages are static strings we author ourselves
+    // (e.g. "code already in use"), so they are safe to show, unlike raw DB errors.
+    const revealMessage = status === 413 || error instanceof AdminValidationError;
+    if (url.pathname.startsWith("/admin")) sendAdminHtml(response, status, renderAdminError({ title: revealMessage ? "Code not added" : "Service unavailable", message: revealMessage ? error.message : "The database request did not complete. Please try again.", status }));
     else sendJson(response, status, { error: status === 413 || status === 400 ? error.message : "Service temporarily unavailable" });
   }
 });
 
 server.listen(config.port, "0.0.0.0", () => {
-  log("info", "server_listening", { port: config.port, publicBackendUrl: config.publicBackendUrl, adminOrigins: [...allowedAdminOrigins], publicSiteOrigins: [...allowedOrigins], debugLogs: config.debugLogs });
+  log("info", "server_listening", { port: config.port, publicBackendUrl: config.publicBackendUrl, adminOrigins: [...allowedAdminOrigins], publicSiteOrigins: [...allowedOrigins], debugLogs: config.debugLogs, useMemoryDb: config.useMemoryDb });
+  if (config.useMemoryDb) log("info", "memory_db_active", { warning: "Data is in-memory only and is lost on restart. Do not use this mode in production." });
 });
 
 server.headersTimeout = 10_000;

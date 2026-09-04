@@ -35,22 +35,35 @@ function originList(name, value, { required = false } = {}) {
 }
 
 export function readConfig(env = process.env) {
-  const required = ["NOCODB_URL", "NOCODB_API_TOKEN", "NOCODB_PROJECT_ID", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
-  const missing = required.filter((key) => !String(env[key] || "").trim());
+  // USE_MEMORY_DB swaps NocoDB for an in-process store (see src/memory-db.js)
+  // so the service runs with no external accounts or API keys. Data does not
+  // persist across restarts. Never enable this in production.
+  const useMemoryDb = env.USE_MEMORY_DB === "true";
+  const port = Number(env.PORT || 3000);
+  const nodeEnv = env.NODE_ENV || (useMemoryDb ? "development" : "production");
+
+  const required = useMemoryDb
+    ? ["HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"]
+    : ["NOCODB_URL", "NOCODB_API_TOKEN", "NOCODB_PROJECT_ID", "HEALTHCHECK_SECRET", "PUBLIC_BACKEND_URL"];
+  const healthcheckSecret = env.HEALTHCHECK_SECRET || (useMemoryDb ? "dev-only-secret-do-not-use-in-production-000" : "");
+  const publicBackendUrlInput = env.PUBLIC_BACKEND_URL || (useMemoryDb ? `http://localhost:${port}` : "");
+  const missing = required.filter((key) => {
+    if (key === "HEALTHCHECK_SECRET") return !healthcheckSecret.trim();
+    if (key === "PUBLIC_BACKEND_URL") return !publicBackendUrlInput.trim();
+    return !String(env[key] || "").trim();
+  });
   if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
 
-  const nodeEnv = env.NODE_ENV || "production";
-  const port = Number(env.PORT || 3000);
   const leaderboardCacheTtlMs = Number(env.LEADERBOARD_CACHE_TTL_MS || 30_000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be an integer from 1 to 65535.");
   if (!Number.isInteger(leaderboardCacheTtlMs) || leaderboardCacheTtlMs < 1_000 || leaderboardCacheTtlMs > 300_000) {
     throw new Error("LEADERBOARD_CACHE_TTL_MS must be an integer from 1000 to 300000.");
   }
-  if (String(env.HEALTHCHECK_SECRET).length < 32) throw new Error("HEALTHCHECK_SECRET must contain at least 32 characters.");
-  if (!/^[A-Za-z0-9_-]+$/.test(env.NOCODB_PROJECT_ID)) throw new Error("NOCODB_PROJECT_ID contains unsupported characters.");
+  if (String(healthcheckSecret).length < 32) throw new Error("HEALTHCHECK_SECRET must contain at least 32 characters.");
+  if (!useMemoryDb && !/^[A-Za-z0-9_-]+$/.test(env.NOCODB_PROJECT_ID)) throw new Error("NOCODB_PROJECT_ID contains unsupported characters.");
 
-  const publicBackendUrl = requiredUrl("PUBLIC_BACKEND_URL", env.PUBLIC_BACKEND_URL, { httpsInProduction: true, nodeEnv, originOnly: true });
-  const nocodbUrl = requiredUrl("NOCODB_URL", env.NOCODB_URL, { nodeEnv });
+  const publicBackendUrl = requiredUrl("PUBLIC_BACKEND_URL", publicBackendUrlInput, { httpsInProduction: true, nodeEnv, originOnly: true });
+  const nocodbUrl = useMemoryDb ? "" : requiredUrl("NOCODB_URL", env.NOCODB_URL, { nodeEnv });
   const adminOrigins = originList("ADMIN_ORIGINS", env.ADMIN_ORIGINS || publicBackendUrl, { required: true });
   const publicSiteOrigins = originList("PUBLIC_SITE_ORIGINS", env.PUBLIC_SITE_ORIGINS || "");
 
@@ -58,10 +71,11 @@ export function readConfig(env = process.env) {
     port,
     leaderboardCacheTtlMs,
     nodeEnv,
+    useMemoryDb,
     nocodbUrl,
-    nocodbApiToken: env.NOCODB_API_TOKEN,
-    nocodbProjectId: env.NOCODB_PROJECT_ID,
-    healthcheckSecret: env.HEALTHCHECK_SECRET,
+    nocodbApiToken: useMemoryDb ? "" : env.NOCODB_API_TOKEN,
+    nocodbProjectId: useMemoryDb ? "" : env.NOCODB_PROJECT_ID,
+    healthcheckSecret,
     publicBackendUrl,
     publicSiteOrigins,
     adminOrigins,

@@ -48,6 +48,54 @@ test("Joined displays NocoDB's automatic CreatedAt timestamp", () => {
   assert.doesNotMatch(html, />Unknown</);
 });
 
+test("renders additional codes and an add-code form scoped to the attendee", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [{ Id: 1, name: "Nova", public_slug: "bp_program", active: true }],
+    attendees: [{
+      Id: 7,
+      program_slug: "bp_program",
+      first_name: "Alice",
+      last_name: "Example",
+      email: "alice@example.com",
+      owned_referral_code: "ALIC-ABC123",
+      additional_referral_codes: "FRIEND-CODE,<script>",
+    }],
+    leaderboardsByProgram: new Map([["bp_program", []]]),
+  });
+
+  assert.match(html, /<code>FRIEND-CODE<\/code>/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /action="\/admin\/attendees\/7\/referral-codes"/);
+});
+
+test("filters and sorts attendees by the requested program and field", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [
+      { Id: 1, name: "Nova", public_slug: "bp_nova", active: true },
+      { Id: 2, name: "Kiwi", public_slug: "bp_kiwi", active: true },
+    ],
+    attendees: [
+      { Id: 1, program_slug: "bp_nova", first_name: "Zed", last_name: "Example", email: "zed@example.com" },
+      { Id: 2, program_slug: "bp_kiwi", first_name: "Amy", last_name: "Example", email: "amy@example.com" },
+      { Id: 3, program_slug: "bp_nova", first_name: "Ana", last_name: "Example", email: "ana@example.com" },
+    ],
+    leaderboardsByProgram: new Map([["bp_nova", []], ["bp_kiwi", []]]),
+    sort: "first_name",
+    dir: "asc",
+    programFilter: "bp_nova",
+  });
+
+  const zedIndex = html.indexOf(">Zed<");
+  const anaIndex = html.indexOf(">Ana<");
+  assert.doesNotMatch(html, />Amy</);
+  assert.ok(anaIndex > 0 && zedIndex > anaIndex, "Ana should sort before Zed");
+  assert.match(html, /<option value="bp_nova" selected>/);
+});
+
 test("rotation forms use NocoDB's uppercase Id field", () => {
   const html = renderAdmin({
     title: "Beacons",

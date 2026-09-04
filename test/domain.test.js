@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createProgramCredentials,
   escapeHtml,
+  formatReferralCodeList,
   generateRefCode,
   hashSecret,
   isBearerAuthorized,
@@ -10,6 +11,7 @@ import {
   isValidReferralCode,
   isValidPublicSlug,
   parseAllowedOrigins,
+  parseReferralCodeList,
   toPublicLeaderboard,
   validateProgramName,
   validateSignup,
@@ -99,6 +101,12 @@ test("public leaderboard strips private fields and excludes zero counts", () => 
     { displayName: "Ari", referralCount: 3 },
     { displayName: "Mia", referralCount: 2 },
   ]);
+});
+
+test("parses a comma-separated additional-codes column, normalizing case and dropping invalid or duplicate entries", () => {
+  assert.deepEqual(parseReferralCodeList(" friend-code ,VIP-1, friend-code,BAD)~OR(X,"), ["FRIEND-CODE", "VIP-1"]);
+  assert.deepEqual(parseReferralCodeList(null), []);
+  assert.equal(formatReferralCodeList(["FRIEND-CODE", "VIP-1"]), "FRIEND-CODE,VIP-1");
 });
 
 test("escapes admin values", () => {

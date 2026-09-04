@@ -27,6 +27,27 @@ export function isValidReferralCode(value) {
   return code.length > 0 && code.length <= MAX_CODE_LENGTH && REFERRAL_CODE_PATTERN.test(code);
 }
 
+// Extra codes for one attendee are stored as a comma-separated list in a
+// single NocoDB column so organisers can also edit them directly in NocoDB.
+export function parseReferralCodeList(value) {
+  const codes = String(value || "")
+    .split(",")
+    .map((code) => code.trim().toUpperCase())
+    .filter(isValidReferralCode);
+  return [...new Set(codes)];
+}
+
+export function formatReferralCodeList(codes) {
+  return codes.join(",");
+}
+
+export class AdminValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.statusCode = 409;
+  }
+}
+
 export function validateSignup(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, errors: ["Request body must be a JSON object."] };

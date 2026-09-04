@@ -1,9 +1,10 @@
-import { generateRefCode, toPublicLeaderboard } from "./domain.js";
+import { AdminValidationError, formatReferralCodeList, generateRefCode, parseReferralCodeList, toPublicLeaderboard } from "./domain.js";
 
 const REQUIRED_COLUMNS = {
   programs: ["Id", "name", "public_slug", "webhook_secret_hash", "loops_transactional_id", "active"],
   attendees: ["Id", "program_slug", "first_name", "last_name", "preferred_name", "email", "email_normalized", "owned_referral_code", "referral_code_used"],
 };
+const ADDITIONAL_CODES_COLUMN = "additional_referral_codes";
 
 export function createNocoDBClient({ url, apiToken, projectId }) {
   const baseUrl = String(url || "").replace(/\/$/, "");
@@ -31,6 +32,90 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
 
   let tableIdMap = null;
   const programSignupLocks = new Map();
+
+  // Serializes referral-code allocation (new signups and admin-added codes)
+  // against every other write for the same program in this process.
+  async function withProgramLock(programSlug, fn) {
+    const previous = programSignupLocks.get(programSlug) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    programSignupLocks.set(programSlug, current);
+
+    await previous.catch(() => {});
+
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (programSignupLocks.get(programSlug) === current) programSignupLocks.delete(programSlug);
+    }
+  }
+
+  // Multiple/custom referral codes are an optional upgrade: additional_referral_codes
+  // is not in REQUIRED_COLUMNS, so a base that hasn't added it yet keeps working
+  // exactly as before (one code per attendee). This checks once per process and
+  // caches the result, so existing deployments never send a `where` filter for a
+  // column NocoDB doesn't know about.
+  let additionalCodesColumnPresent = null;
+  async function hasAdditionalCodesColumn(attendeesTableId) {
+    if (additionalCodesColumnPresent === null) {
+      const metadata = await request(`/api/v2/meta/tables/${attendeesTableId}`);
+      const columns = new Set();
+      for (const column of metadata?.columns || []) {
+        if (column.title) columns.add(column.title);
+        if (column.column_name) columns.add(column.column_name);
+      }
+      additionalCodesColumnPresent = columns.has(ADDITIONAL_CODES_COLUMN);
+    }
+    return additionalCodesColumnPresent;
+  }
+
+  // additional_referral_codes is meant to be hand-edited directly in NocoDB
+  // (unlike owned_referral_code, which the app always writes in uppercase
+  // itself), so a stored code can be in any case. A `where...like` filter
+  // would push that case comparison down to the database, and plain SQL
+  // LIKE is case-sensitive on most backends NocoDB can run on - so instead
+  // this fetches every attendee in the program once and matches case-
+  // insensitively in JS via parseReferralCodeList, the same way owned/
+  // additional codes are already compared everywhere else.
+  async function programAttendees(programSlug) {
+    const query = encodeURIComponent(`(program_slug,eq,${programSlug})`);
+    return fetchAll("attendees", `?where=${query}`);
+  }
+
+  function ownsCode(candidate, code) {
+    return String(candidate.owned_referral_code || "").toUpperCase() === code
+      || parseReferralCodeList(candidate.additional_referral_codes).includes(code);
+  }
+
+  // A code is taken if it is anyone's owned code, or appears in anyone's
+  // additional-codes list, within the same program. The initial `eq` query
+  // is a fast path for the common case (the app always writes owned codes in
+  // uppercase itself); once the additional-codes column exists, the full
+  // program fetch below also re-checks owned codes case-insensitively, which
+  // costs nothing extra and covers an owned code someone hand-edited in
+  // NocoDB to a different case.
+  async function isCodeTaken(attendeesTableId, programSlug, code) {
+    const ownedQuery = encodeURIComponent(`(owned_referral_code,eq,${code})~and(program_slug,eq,${programSlug})`);
+    const ownedRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${ownedQuery}&limit=1`);
+    if (ownedRes.list && ownedRes.list.length > 0) return true;
+    if (!(await hasAdditionalCodesColumn(attendeesTableId))) return false;
+
+    const candidates = await programAttendees(programSlug);
+    return candidates.some((candidate) => ownsCode(candidate, code));
+  }
+
+  // Finds the attendee (if any) who owns a given code, checking both their
+  // owned code and their additional codes.
+  async function findCodeOwner(attendeesTableId, programSlug, code) {
+    const ownedQuery = encodeURIComponent(`(owned_referral_code,eq,${code})~and(program_slug,eq,${programSlug})`);
+    const ownedRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${ownedQuery}&limit=1`);
+    if (ownedRes.list && ownedRes.list.length > 0) return ownedRes.list[0];
+    if (!(await hasAdditionalCodesColumn(attendeesTableId))) return null;
+
+    const candidates = await programAttendees(programSlug);
+    return candidates.find((candidate) => ownsCode(candidate, code)) || null;
+  }
 
   async function resolveTableId(tableName) {
     if (!projectId) throw new Error("NOCODB_PROJECT_ID is required to resolve tables");
@@ -81,20 +166,25 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       const normalizedEmail = String(signup.email || "").trim().toLowerCase();
       // Keep code allocation plus insertion atomic relative to every other
       // signup for this program in the supported single-process deployment.
-      const lockKey = program.public_slug;
-      const previous = programSignupLocks.get(lockKey) || Promise.resolve();
-      let release;
-      const current = new Promise((resolve) => { release = resolve; });
-      programSignupLocks.set(lockKey, current);
+      return withProgramLock(program.public_slug, () => acceptSignupOnce(program, signup, generatedRefCode, normalizedEmail));
+    },
 
-      await previous.catch(() => {});
+    async getAttendeeById(id) {
+      const attendeesTableId = await resolveTableId("attendees");
+      const idQuery = encodeURIComponent(`(Id,eq,${id})`);
+      const res = await request(`/api/v2/tables/${attendeesTableId}/records?where=${idQuery}&limit=1`);
+      if (res.list && res.list.length > 0) return res.list[0];
 
-      try {
-        return await acceptSignupOnce(program, signup, generatedRefCode, normalizedEmail);
-      } finally {
-        release();
-        if (programSignupLocks.get(lockKey) === current) programSignupLocks.delete(lockKey);
-      }
+      const id2Query = encodeURIComponent(`(id,eq,${id})`);
+      const res2 = await request(`/api/v2/tables/${attendeesTableId}/records?where=${id2Query}&limit=1`);
+      return res2.list && res2.list.length > 0 ? res2.list[0] : null;
+    },
+
+    // Adds one more code to an attendee: a validated custom code, or an
+    // auto-generated one when customCode is null. Serialized per program
+    // alongside signups so allocation never races a new signup's own check.
+    async addReferralCode(attendee, customCode) {
+      return withProgramLock(attendee.program_slug, () => addReferralCodeOnce(attendee, customCode));
     },
 
     async getProgramBySlug(programSlug) {
@@ -110,22 +200,35 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       // Fetch all attendees for this program
       const query = encodeURIComponent(`(program_slug,eq,${programSlug})`);
       const attendees = await fetchAll("attendees", `?where=${query}`);
-      
-      // Calculate referrals
-      const counts = {};
+
+      // Every code an attendee owns (their own plus any additional codes)
+      // maps back to that attendee, so a referral counts toward one total
+      // no matter which of their codes was used. Falls back to the owned
+      // code itself when no record id is present.
+      const attendeeKey = (attendee) => attendee.Id ?? attendee.id ?? String(attendee.owned_referral_code || "").toUpperCase();
+      const codeOwnerIndex = new Map();
       for (const attendee of attendees) {
-        if (attendee.referral_code_used) {
-          const usedCode = attendee.referral_code_used.toUpperCase();
-          counts[usedCode] = (counts[usedCode] || 0) + 1;
+        const key = attendeeKey(attendee);
+        const ownedCode = String(attendee.owned_referral_code || "").toUpperCase();
+        if (ownedCode) codeOwnerIndex.set(ownedCode, key);
+        for (const code of parseReferralCodeList(attendee.additional_referral_codes)) {
+          codeOwnerIndex.set(code, key);
         }
       }
 
+      // Calculate referrals
+      const counts = new Map();
+      for (const attendee of attendees) {
+        if (!attendee.referral_code_used) continue;
+        const ownerKey = codeOwnerIndex.get(attendee.referral_code_used.toUpperCase());
+        if (ownerKey === undefined) continue;
+        counts.set(ownerKey, (counts.get(ownerKey) || 0) + 1);
+      }
+
       const leaderboard = attendees.map(a => {
-        const ownedCode = String(a.owned_referral_code || "").toUpperCase();
-        const count = counts[ownedCode] || 0;
         return {
           display_name: a.preferred_name || a.first_name,
-          referral_count: count
+          referral_count: counts.get(attendeeKey(a)) || 0
         };
       });
 
@@ -210,23 +313,22 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       return { authorized: true, accepted: false, referral_applied: false };
     }
 
-    // Check if a valid referral code was used.
+    // Check if a valid referral code was used (an owner's own code, or one
+    // of their additional codes).
     let referrerId = null;
     let validReferralCode = null;
     if (signup.referralCodeUsed) {
-      const codeQuery = encodeURIComponent(`(owned_referral_code,eq,${signup.referralCodeUsed.toUpperCase()})~and(program_slug,eq,${program.public_slug})`);
-      const referrerRes = await request(`/api/v2/tables/${attendeesTableId}/records?where=${codeQuery}&limit=1`);
-      if (referrerRes.list && referrerRes.list.length > 0) {
-        referrerId = referrerRes.list[0].Id || referrerRes.list[0].id;
-        validReferralCode = signup.referralCodeUsed.toUpperCase();
+      const code = signup.referralCodeUsed.toUpperCase();
+      const referrer = await findCodeOwner(attendeesTableId, program.public_slug, code);
+      if (referrer) {
+        referrerId = referrer.Id || referrer.id;
+        validReferralCode = code;
       }
     }
 
     let ownedReferralCode = generatedRefCode;
     for (let attempt = 0; attempt < 100; attempt++) {
-      const ownedCodeQuery = encodeURIComponent(`(owned_referral_code,eq,${ownedReferralCode})~and(program_slug,eq,${program.public_slug})`);
-      const owner = await request(`/api/v2/tables/${attendeesTableId}/records?where=${ownedCodeQuery}&limit=1`);
-      if (!owner.list || owner.list.length === 0) break;
+      if (!(await isCodeTaken(attendeesTableId, program.public_slug, ownedReferralCode))) break;
       ownedReferralCode = generateRefCode(signup.firstName, signup.lastName, normalizedEmail);
       if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
     }
@@ -255,6 +357,43 @@ export function createNocoDBClient({ url, apiToken, projectId }) {
       referral_applied: referrerId !== null,
       loops_transactional_id: program.loops_transactional_id
     };
+  }
+
+  async function addReferralCodeOnce(attendee, customCode) {
+    const attendeesTableId = await resolveTableId("attendees");
+    if (!(await hasAdditionalCodesColumn(attendeesTableId))) {
+      throw new AdminValidationError("Add the additional_referral_codes column to the attendees table in NocoDB before assigning extra codes.");
+    }
+    const programSlug = attendee.program_slug;
+    const attendeeId = attendee.Id ?? attendee.id;
+    const ownedCode = String(attendee.owned_referral_code || "").toUpperCase();
+    const existingAdditional = parseReferralCodeList(attendee.additional_referral_codes);
+
+    let code;
+    if (customCode) {
+      if (customCode === ownedCode || existingAdditional.includes(customCode)) {
+        throw new AdminValidationError("This attendee already has that referral code.");
+      }
+      if (await isCodeTaken(attendeesTableId, programSlug, customCode)) {
+        throw new AdminValidationError("That referral code is already used in this program.");
+      }
+      code = customCode;
+    } else {
+      code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email);
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (!(await isCodeTaken(attendeesTableId, programSlug, code))) break;
+        code = generateRefCode(attendee.first_name, attendee.last_name, attendee.email);
+        if (attempt === 99) throw new Error("Could not allocate a unique referral code.");
+      }
+    }
+
+    const updatedList = [...existingAdditional, code];
+    await request(`/api/v2/tables/${attendeesTableId}/records`, {
+      method: "PATCH",
+      body: JSON.stringify({ Id: attendeeId, additional_referral_codes: formatReferralCodeList(updatedList) }),
+    });
+
+    return code;
   }
 }
 

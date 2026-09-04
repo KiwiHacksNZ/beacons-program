@@ -1,10 +1,23 @@
-import { escapeHtml } from "./domain.js";
+import { escapeHtml, parseReferralCodeList } from "./domain.js";
+
+const SORT_FIELDS = {
+  program: (attendee, programMap) => (programMap.get(attendee.program_slug)?.name || "").toLowerCase(),
+  first_name: (attendee) => (attendee.first_name || "").toLowerCase(),
+  last_name: (attendee) => (attendee.last_name || "").toLowerCase(),
+  email: (attendee) => (attendee.email || "").toLowerCase(),
+  owned_referral_code: (attendee) => (attendee.owned_referral_code || "").toLowerCase(),
+  joined: (attendee) => attendee.CreatedAt || attendee.created_at || attendee.createdAt || "",
+};
 
 function text(value) {
   return value ? escapeHtml(value) : '<span class="muted">—</span>';
 }
 
-export function renderAdmin({ title, backendUrl, programs, attendees, leaderboardsByProgram }) {
+function attendeeId(attendee) {
+  return attendee.Id ?? attendee.id;
+}
+
+export function renderAdmin({ title, backendUrl, programs, attendees, leaderboardsByProgram, sort, dir, programFilter }) {
   const programMap = new Map();
   for (const p of programs) {
     const programId = p.Id ?? p.id;
@@ -12,18 +25,59 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     programMap.set(String(programId), p);
     if (p.public_slug) programMap.set(p.public_slug, p);
   }
-  const attendeeRows = attendees.length
-    ? attendees.map((attendee) => {
+
+  const activeProgramFilter = programFilter && programMap.has(programFilter) ? programFilter : "";
+  const visibleAttendees = activeProgramFilter
+    ? attendees.filter((attendee) => attendee.program_slug === activeProgramFilter)
+    : attendees;
+
+  const activeSort = Object.hasOwn(SORT_FIELDS, sort) ? sort : null;
+  const activeDir = dir === "asc" ? "asc" : "desc";
+  const sortedAttendees = activeSort
+    ? [...visibleAttendees].sort((a, b) => {
+      const left = SORT_FIELDS[activeSort](a, programMap);
+      const right = SORT_FIELDS[activeSort](b, programMap);
+      const compared = left < right ? -1 : left > right ? 1 : 0;
+      return activeDir === "asc" ? compared : -compared;
+    })
+    : visibleAttendees;
+
+  const attendeeRows = sortedAttendees.length
+    ? sortedAttendees.map((attendee) => {
       const program = programMap.get(attendee.program_slug);
       const joinedAt = attendee.CreatedAt || attendee.created_at || attendee.createdAt;
+      const additionalCodes = parseReferralCodeList(attendee.additional_referral_codes);
+      const id = attendeeId(attendee);
       return `<tr>
         <td>${text(program?.name || "Unknown program")}</td><td>${text(attendee.first_name)}</td><td>${text(attendee.last_name)}</td>
         <td><!--email_off--><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a><!--/email_off--></td><td>${text(attendee.preferred_name)}</td>
         <td><code>${text(attendee.owned_referral_code)}</code></td><td><code>${text(attendee.referral_code_used)}</code></td>
+        <td>${renderAdditionalCodes(additionalCodes)}
+          ${id !== undefined ? `<form method="post" action="/admin/attendees/${encodeURIComponent(id)}/referral-codes" class="inline-code-form">
+            <input type="text" name="code" maxlength="64" placeholder="Auto-generate" aria-label="Custom referral code (optional)">
+            <button class="quiet-button" type="submit">+ Add code</button>
+          </form>` : ""}
+        </td>
         <td>${renderJoinedAt(joinedAt)}</td>
       </tr>`;
     }).join("")
-    : '<tr><td colspan="8" class="empty">No accepted signups yet.</td></tr>';
+    : '<tr><td colspan="9" class="empty">No accepted signups yet.</td></tr>';
+
+  const programFilterOptions = programs.map((p) => `<option value="${escapeHtml(p.public_slug)}"${p.public_slug === activeProgramFilter ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
+  const filterForm = `<form method="get" action="/admin" class="attendee-filter"><label for="program-filter">Program</label>
+    <select id="program-filter" name="program"><option value="">All programs</option>${programFilterOptions}</select>
+    ${activeSort ? `<input type="hidden" name="sort" value="${escapeHtml(activeSort)}"><input type="hidden" name="dir" value="${escapeHtml(activeDir)}">` : ""}
+    <button class="quiet-button" type="submit">View</button></form>`;
+
+  const sortHeader = (field, label) => {
+    const nextDir = activeSort === field && activeDir === "asc" ? "desc" : "asc";
+    const params = new URLSearchParams();
+    if (activeProgramFilter) params.set("program", activeProgramFilter);
+    params.set("sort", field);
+    params.set("dir", nextDir);
+    const indicator = activeSort === field ? (activeDir === "asc" ? " ↑" : " ↓") : "";
+    return `<a href="/admin?${params.toString()}">${escapeHtml(label)}${indicator}</a>`;
+  };
 
   const programCards = programs.length
     ? programs.map((program) => {
@@ -53,8 +107,9 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     <form method="post" action="/admin/programs"><label for="program-name">Program or event name</label><div class="form-row"><input id="program-name" name="name" maxlength="120" required placeholder="e.g. KiwiHacks Nova 2027"></div><label for="loops-id">Loops Transactional ID (Optional)</label><div class="form-row"><input id="loops-id" name="loopsTransactionalId" placeholder="e.g. cm1152..."></div><div class="form-row"><button type="submit">Create program</button></div></form>
   </section>
   <section aria-labelledby="programs-title"><div class="section-heading"><div><p class="kicker">PROGRAM-SCOPED</p><h2 id="programs-title">Programs & leaderboards</h2></div><span class="chip">${programs.length} total</span></div><div class="program-grid">${programCards}</div></section>
-  <section class="attendees" aria-labelledby="attendees-title"><div class="section-heading"><div><p class="kicker">PRIVATE DETAILS</p><h2 id="attendees-title">Accepted signups</h2></div><span class="chip">${attendees.length} total</span></div>
-    <div class="table-wrap" tabindex="0" role="region" aria-label="Accepted signups table"><table><thead><tr><th>Program</th><th>First name</th><th>Last name</th><th>Email</th><th>Preferred name</th><th>Owned code</th><th>Code used</th><th>Joined</th></tr></thead><tbody>${attendeeRows}</tbody></table></div>
+  <section class="attendees" aria-labelledby="attendees-title"><div class="section-heading"><div><p class="kicker">PRIVATE DETAILS</p><h2 id="attendees-title">Accepted signups</h2></div><span class="chip">${sortedAttendees.length} of ${attendees.length}</span></div>
+    ${filterForm}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Accepted signups table"><table><thead><tr><th>${sortHeader("program", "Program")}</th><th>${sortHeader("first_name", "First name")}</th><th>${sortHeader("last_name", "Last name")}</th><th>${sortHeader("email", "Email")}</th><th>Preferred name</th><th>${sortHeader("owned_referral_code", "Owned code")}</th><th>Code used</th><th>Additional codes</th><th>${sortHeader("joined", "Joined")}</th></tr></thead><tbody>${attendeeRows}</tbody></table></div>
   </section>
 </main><footer>Personal details and program management stay behind Cloudflare Access.</footer></body></html>`;
 }
@@ -69,6 +124,11 @@ export function renderProgramSecret({ mode, programName, webhookUrl, publicLeade
 
 export function renderAdminError({ title, message, status = 400 }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${status} · ${escapeHtml(title)}</title><link rel="stylesheet" href="/admin/styles.css"></head><body><main class="secret-page"><section class="secret-card"><p class="kicker">COULDN'T SAVE</p><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><a class="button-link" href="/admin">Return to dashboard</a></section></main></body></html>`;
+}
+
+function renderAdditionalCodes(codes) {
+  if (!codes.length) return "";
+  return `<ul class="code-list">${codes.map((code) => `<li><code>${escapeHtml(code)}</code></li>`).join("")}</ul>`;
 }
 
 function renderLeaders(leaders) {

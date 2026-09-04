@@ -29,3 +29,16 @@ test("rejects insecure or malformed production configuration", () => {
   assert.throws(() => readConfig({ ...validEnv, ADMIN_ORIGINS: "not-an-origin" }), /invalid origin/);
   assert.throws(() => readConfig({ ...validEnv, LEADERBOARD_CACHE_TTL_MS: "5" }), /1000 to 300000/);
 });
+
+test("USE_MEMORY_DB needs no NocoDB variables and picks safe localhost defaults", () => {
+  const config = readConfig({ USE_MEMORY_DB: "true" });
+  assert.equal(config.useMemoryDb, true);
+  assert.equal(config.nodeEnv, "development");
+  assert.equal(config.publicBackendUrl, "http://localhost:3000");
+  assert.equal(config.adminOrigins, "http://localhost:3000");
+  assert.equal(config.nocodbUrl, "");
+});
+
+test("USE_MEMORY_DB still enforces its own required variables when overridden", () => {
+  assert.throws(() => readConfig({ USE_MEMORY_DB: "true", HEALTHCHECK_SECRET: "short" }), /at least 32/);
+});
