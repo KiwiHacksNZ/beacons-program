@@ -49,6 +49,16 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     })
     : visibleAttendees;
 
+  // Every action inside this table (add/remove code, search, sort, filter)
+  // is a full page navigation, not an in-page update. Carrying the current
+  // view state through each form/link and landing back on this section's
+  // anchor (rather than the bare /admin URL) is what keeps the organiser's
+  // place instead of dumping them back at the page top with a reset table.
+  const stateFields = `${activeSort ? `<input type="hidden" name="sort" value="${escapeHtml(activeSort)}">` : ""}
+    <input type="hidden" name="dir" value="${escapeHtml(activeDir)}">
+    ${activeProgramFilter ? `<input type="hidden" name="program" value="${escapeHtml(activeProgramFilter)}">` : ""}
+    ${activeSearch ? `<input type="hidden" name="q" value="${escapeHtml(activeSearch)}">` : ""}`;
+
   const attendeeRows = sortedAttendees.length
     ? sortedAttendees.map((attendee) => {
       const program = programMap.get(attendee.program_slug);
@@ -59,9 +69,10 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
         <td>${text(program?.name || "Unknown program")}</td><td>${text(attendee.first_name)}</td><td>${text(attendee.last_name)}</td>
         <td><!--email_off--><a href="mailto:${escapeHtml(attendee.email)}">${text(attendee.email)}</a><!--/email_off--></td><td>${text(attendee.preferred_name)}</td>
         <td><code>${text(attendee.owned_referral_code)}</code></td><td><code>${text(attendee.referral_code_used)}</code></td>
-        <td>${renderAdditionalCodes(additionalCodes, id)}
+        <td>${renderAdditionalCodes(additionalCodes, id, stateFields)}
           ${id !== undefined ? `<form method="post" action="/admin/attendees/${encodeURIComponent(id)}/referral-codes" class="inline-code-form">
             <input type="text" name="code" maxlength="64" placeholder="Auto-generate" aria-label="Custom referral code (optional)">
+            ${stateFields}
             <button class="quiet-button" type="submit">+ Add code</button>
           </form>` : ""}
         </td>
@@ -71,7 +82,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     : '<tr><td colspan="9" class="empty">No accepted signups yet.</td></tr>';
 
   const programFilterOptions = programs.map((p) => `<option value="${escapeHtml(p.public_slug)}"${p.public_slug === activeProgramFilter ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
-  const filterForm = `<form method="get" action="/admin" class="attendee-filter">
+  const filterForm = `<form method="get" action="/admin#attendees-title" class="attendee-filter">
     <label for="attendee-search">Search</label>
     <input type="search" id="attendee-search" name="q" value="${escapeHtml(activeSearch)}" placeholder="Name or email">
     <label for="program-filter">Program</label>
@@ -87,7 +98,7 @@ export function renderAdmin({ title, backendUrl, programs, attendees, leaderboar
     params.set("sort", field);
     params.set("dir", nextDir);
     const indicator = activeSort === field ? (activeDir === "asc" ? " ↑" : " ↓") : "";
-    return `<a href="/admin?${params.toString()}">${escapeHtml(label)}${indicator}</a>`;
+    return `<a href="/admin?${params.toString()}#attendees-title">${escapeHtml(label)}${indicator}</a>`;
   };
 
   const programCards = programs.length
@@ -137,9 +148,9 @@ export function renderAdminError({ title, message, status = 400 }) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${status} · ${escapeHtml(title)}</title><link rel="stylesheet" href="/admin/styles.css"></head><body><main class="secret-page"><section class="secret-card"><p class="kicker">COULDN'T SAVE</p><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><a class="button-link" href="/admin">Return to dashboard</a></section></main></body></html>`;
 }
 
-function renderAdditionalCodes(codes, id) {
+function renderAdditionalCodes(codes, id, stateFields) {
   if (!codes.length) return "";
-  return `<ul class="code-list">${codes.map((code) => `<li><code>${escapeHtml(code)}</code>${id !== undefined ? `<form method="post" action="/admin/attendees/${encodeURIComponent(id)}/referral-codes/remove" class="inline-remove-form"><input type="hidden" name="code" value="${escapeHtml(code)}"><button class="quiet-button" type="submit" aria-label="Remove ${escapeHtml(code)}">Remove</button></form>` : ""}</li>`).join("")}</ul>`;
+  return `<ul class="code-list">${codes.map((code) => `<li><code>${escapeHtml(code)}</code>${id !== undefined ? `<form method="post" action="/admin/attendees/${encodeURIComponent(id)}/referral-codes/remove" class="inline-remove-form"><input type="hidden" name="code" value="${escapeHtml(code)}">${stateFields}<button class="quiet-button" type="submit" aria-label="Remove ${escapeHtml(code)}">Remove</button></form>` : ""}</li>`).join("")}</ul>`;
 }
 
 function renderLeaders(leaders) {

@@ -224,7 +224,7 @@ const server = createServer(async (request, response) => {
       const attendee = await db.getAttendeeById(addCodeMatch[1]);
       if (!attendee) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "That signup no longer exists.", status: 404 })); return; }
       await db.addReferralCode(attendee, rawCode ? rawCode.toUpperCase() : null);
-      response.writeHead(303, { location: "/admin" }).end();
+      response.writeHead(303, { location: adminRedirectUrl(form) }).end();
       return;
     }
 
@@ -241,7 +241,7 @@ const server = createServer(async (request, response) => {
       const attendee = await db.getAttendeeById(removeCodeMatch[1]);
       if (!attendee) { sendAdminHtml(response, 404, renderAdminError({ title: "Attendee not found", message: "That signup no longer exists.", status: 404 })); return; }
       await db.removeReferralCode(attendee, rawCode);
-      response.writeHead(303, { location: "/admin" }).end();
+      response.writeHead(303, { location: adminRedirectUrl(form) }).end();
       return;
     }
 
@@ -282,6 +282,22 @@ server.on("error", (error) => {
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.once(signal, () => shutdown(signal));
+}
+
+// Rebuilds the attendee table's current search/sort/filter state (carried
+// through as hidden fields on every in-table form) into a redirect target,
+// so an action inside the table returns to the same view and scroll
+// position instead of a bare, reset /admin page. renderAdmin re-validates
+// every value from the query string on the way back in, so an unexpected
+// value here just falls back to the default view rather than causing harm.
+function adminRedirectUrl(form) {
+  const params = new URLSearchParams();
+  for (const key of ["sort", "dir", "program", "q"]) {
+    const value = String(form.get(key) || "").trim();
+    if (value) params.set(key, value);
+  }
+  const query = params.toString();
+  return `/admin${query ? `?${query}` : ""}#attendees-title`;
 }
 
 function programUrls(programSlug) {

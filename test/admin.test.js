@@ -72,6 +72,43 @@ test("renders additional codes and an add-code form scoped to the attendee", () 
   assert.match(html, /<input type="hidden" name="code" value="FRIEND-CODE">/);
 });
 
+test("carries the current search/sort/filter state and scroll anchor through every in-table action", () => {
+  const html = renderAdmin({
+    title: "Beacons",
+    backendUrl: "https://beacons.example.com",
+    programs: [{ Id: 1, name: "Nova", public_slug: "bp_nova", active: true }],
+    attendees: [{
+      Id: 7,
+      program_slug: "bp_nova",
+      first_name: "Alice",
+      last_name: "Example",
+      email: "alice@example.com",
+      owned_referral_code: "ALIC-ABC123",
+      additional_referral_codes: "FRIEND-CODE",
+    }],
+    leaderboardsByProgram: new Map([["bp_nova", []]]),
+    sort: "last_name",
+    dir: "asc",
+    programFilter: "bp_nova",
+    search: "ali",
+  });
+
+  // Sort headers and the filter form return to the table, not the page top.
+  assert.match(html, /href="\/admin\?[^"]*#attendees-title"/);
+  assert.match(html, /action="\/admin#attendees-title"/);
+
+  // The add-code and remove-code forms for this row both carry the active
+  // view state as hidden fields, so submitting either preserves it.
+  const addCodeForm = html.match(/<form method="post" action="\/admin\/attendees\/7\/referral-codes" class="inline-code-form">[\s\S]*?<\/form>/)[0];
+  const removeCodeForm = html.match(/<form method="post" action="\/admin\/attendees\/7\/referral-codes\/remove"[^>]*>[\s\S]*?<\/form>/)[0];
+  for (const form of [addCodeForm, removeCodeForm]) {
+    assert.match(form, /<input type="hidden" name="sort" value="last_name">/);
+    assert.match(form, /<input type="hidden" name="dir" value="asc">/);
+    assert.match(form, /<input type="hidden" name="program" value="bp_nova">/);
+    assert.match(form, /<input type="hidden" name="q" value="ali">/);
+  }
+});
+
 test("searches attendees by name or email across programs", () => {
   const html = renderAdmin({
     title: "Beacons",
